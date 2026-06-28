@@ -1,0 +1,72 @@
+{
+  "robot_schema": "rtsim-robot-v1",
+  "name": "Simple N20 PID Robot",
+  "chassis": {
+    "model": "RigidBody2DChassis",
+    "mass_g": 180,
+    "inertia_kg_m2": 0.00045,
+    "center_of_mass_mm": [0, 0]
+  },
+  "normal_force": {
+    "model": "NoDownforce"
+  },
+  "drivetrain": {
+    "type": "DifferentialDrive4Wheel",
+    "wheel_radius_mm": 10,
+    "wheel_width_mm": 10,
+    "track_width_mm": 82
+  },
+  "tire": {
+    "model": "CoulombFrictionWheel",
+    "mu_longitudinal": 1.20,
+    "mu_lateral": 1.00,
+    "rolling_resistance": 0.015
+  },
+  "motors": {
+    "left": {
+      "model": "DcMotorSimple",
+      "gear_ratio": 30,
+      "efficiency": 0.75,
+      "no_load_rpm": 1800,
+      "stall_torque_mnm": 5.0,
+      "stall_current_a": 1.6
+    },
+    "right": {
+      "model": "DcMotorSimple",
+      "gear_ratio": 30,
+      "efficiency": 0.75,
+      "no_load_rpm": 1800,
+      "stall_torque_mnm": 5.0,
+      "stall_current_a": 1.6
+    }
+  },
+  "driver": {
+    "model": "PwmHBridge",
+    "pwm_frequency_hz": 20000,
+    "mode": "brake",
+    "voltage_drop_v": 0.2
+  },
+  "battery": {
+    "model": "LipoBattery",
+    "nominal_voltage_v": 7.4,
+    "cells": 2,
+    "capacity_mah": 300,
+    "internal_resistance_ohm": 0.08
+  },
+  "line_sensor": {
+    "model": "SensorArray16",
+    "count": 16,
+    "width_mm": 72,
+    "forward_offset_mm": 55,
+    "adc_bits": 12
+  },
+  "controller": {
+    "model": "BuiltInPid",
+    "kp": 13.0,
+    "ki": 0.0,
+    "kd": 0.035,
+    "base_pwm": 0.34,
+    "max_pwm": 0.90,
+    "target_position_mm": 0.0
+  }
+}

@@ -1,0 +1,791 @@
+Especificação inicial — Robotrace Sim v0.1
+1. Objetivo do projeto
+
+Criar um simulador de robôs seguidores de linha com foco em realismo físico, modularidade e reaproveitamento parcial dos dados em robôs reais.
+
+O simulador deve permitir:
+
+1. Criar e editar pistas.
+2. Criar e editar robôs.
+3. Simular o comportamento físico do robô na pista.
+4. Testar controladores.
+5. Executar simulações por interface gráfica.
+6. Executar simulações por linha de comando.
+7. Exportar logs, replays e dados para análise.
+8. Comparar simulação com dados reais.
+
+A simulação deve trabalhar com fixed-step determinístico, usando tempo interno em ticks inteiros de microssegundos.
+
+Configuração base:
+
+physics_dt_us = 500
+physics_rate = 2000 Hz
+
+Ou seja:
+
+0,5 ms por passo
+2000 passos físicos para cada 1 segundo simulado
+2. Decisões técnicas principais
+
+Ficam definidas como base:
+
+Item	Decisão
+Linguagem principal	Rust
+Interface	egui/eframe
+Renderização inicial	egui painter
+Renderização futura	wgpu, se necessário
+Formato do projeto	.rtsim, com JSON versionado
+Física	própria, determinística, fixed-step
+Tempo interno	ticks inteiros de microssegundos
+Controlador	Rust built-in + plugin nativo
+Logs	replay binário + CSV exportável
+Testes	unitários, benchmarks e comparação com dados reais
+Execução automatizada	sim, via comando de linha
+3. Arquitetura geral
+
+O projeto deve ter um único executável:
+
+robotrace-sim.exe
+
+Esse executável deve conter:
+
+Home
+Editor de pista
+Editor de robô
+Editor de simulação
+Simulador
+Replay viewer
+Ferramenta de calibração
+Ferramenta de benchmark
+
+Mas internamente, o projeto deve ser dividido em módulos independentes.
+
+Estrutura conceitual:
+
+App/UI
+ ├── Track Editor
+ ├── Robot Editor
+ ├── Simulation Editor
+ ├── Simulator Viewer
+ ├── Replay Viewer
+ └── Calibration Tools
+
+Simulation Core
+ ├── Scheduler
+ ├── Physics Engine
+ ├── Robot Model
+ ├── Track Model
+ ├── Sensor Models
+ ├── Controller API
+ ├── Telemetry
+ └── Replay System
+
+A interface gráfica não deve controlar a física diretamente. A UI apenas configura, visualiza e envia comandos. O núcleo de simulação deve funcionar sozinho, inclusive por terminal.
+
+4. Execução por linha de comando
+
+Esse requisito é importante e deve existir desde o começo, não como recurso futuro.
+
+Exemplos desejados:
+
+robotrace-sim run projeto.rtsim
+robotrace-sim run projeto.rtsim --headless
+robotrace-sim run projeto.rtsim --duration 10s --output resultado.rrlog
+robotrace-sim batch ./experimentos/*.rtsim --output ./resultados/
+robotrace-sim benchmark projeto.rtsim --physics-dt-us 500
+robotrace-sim export resultado.rrlog --format csv
+
+Isso permite testar vários robôs, controladores e parâmetros automaticamente.
+
+5. Conceito central: simulação modular
+
+Cada parte do robô e do ambiente deve ser um módulo selecionável. A ideia é que o usuário possa escolher:
+
+modelo simples
+modelo intermediário
+modelo avançado
+modelo experimental/customizado
+
+Por exemplo, para pneu:
+
+IdealTire
+BasicFrictionTire
+SlipRatioTire
+LoadSensitiveTire
+ThermalWearTire
+
+Para motor:
+
+IdealMotor
+DcMotorSimple
+DcMotorElectrical
+CorelessDcMotor
+BrushlessMotor
+MeasuredMotorCurve
+
+Para sensor:
+
+IdealLineSensor
+ReflectanceSensor
+AnalogIrSensor
+OpticalArraySensor
+MeasuredSensorModel
+
+Assim, o simulador fica maleável: pode rodar rápido com modelos simples ou rodar mais realista com modelos avançados.
+
+6. Módulos principais da simulação
+6.1. Módulo de tempo e scheduler
+
+Esse módulo define quando cada sistema roda.
+
+Nem tudo deve rodar a 2000 Hz. A física pode rodar a 2000 Hz, mas sensores, controle e logs podem ter frequências próprias.
+
+Exemplo:
+
+{
+  "time": {
+    "physics_dt_us": 500,
+    "controller_period_us": 1000,
+    "sensor_period_us": 500,
+    "imu_period_us": 500,
+    "encoder_period_us": 500,
+    "log_period_us": 1000,
+    "render_period_us": 16667
+  }
+}
+
+O scheduler deve garantir:
+
+Física: fixed-step
+Controle: período configurável
+Sensores: período configurável
+Renderização: desacoplada
+Log: desacoplado
+6.2. Módulo de pista
+
+A pista não deve ser apenas uma imagem. Ela deve ter uma representação vetorial e uma representação rasterizada.
+
+Camadas da pista:
+
+Track Geometry
+ ├── retas
+ ├── curvas
+ ├── arcos
+ ├── splines
+ ├── cruzamentos
+ ├── marcações
+ └── largada/chegada
+
+Track Surface
+ ├── material da base
+ ├── material da linha
+ ├── coeficiente de atrito
+ ├── refletância
+ ├── irregularidade
+ ├── sujeira
+ └── emendas
+
+Modelos selecionáveis:
+
+Módulo	Função
+IdealTrack	pista perfeita, linha ideal
+VectorTrack	pista vetorial com largura real da linha
+RasterReflectanceTrack	mapa raster de refletância para sensores
+SurfaceFrictionTrack	atrito variável por região
+DirtyTrack	ruído espacial, sujeira e falhas
+BumpyTrack	pequenas irregularidades de superfície
+
+A pista deve fornecer duas informações principais:
+
+1. Refletância no ponto/área consultada.
+2. Propriedades de contato pneu-solo.
+6.3. Módulo de corpo/chassi
+
+O robô deve ter massa, centro de massa, momento de inércia e geometria.
+
+Parâmetros:
+
+massa total
+posição do centro de massa
+momento de inércia em yaw
+comprimento
+largura
+altura
+posição das rodas
+posição dos sensores
+posição da bateria
+posição dos fans/sucção
+posição do centro aerodinâmico/downforce
+
+Modelos:
+
+Módulo	Função
+PointMassChassis	modelo simples, massa pontual
+RigidBody2DChassis	corpo rígido 2D com inércia
+LoadTransferChassis	considera transferência dinâmica de carga
+FlexibleMountChassis	modelo futuro para vibração/sensor/fan
+
+Para começar, eu usaria RigidBody2DChassis.
+
+6.4. Módulo de rodas e pneus
+
+Esse é um dos módulos mais importantes para realismo.
+
+O robô pode ter:
+
+2 rodas
+4 rodas
+rodas auxiliares
+rodas passivas
+rodas de apoio
+
+Parâmetros por roda:
+
+posição no chassi
+raio
+largura
+massa/inércia
+material
+coeficiente de atrito longitudinal
+coeficiente de atrito lateral
+coeficiente de rolamento
+limite de força
+modelo de slip
+
+Modelos selecionáveis:
+
+Módulo	Realismo	Descrição
+IdealWheel	baixo	sem deslizamento
+CoulombFrictionWheel	médio	limite simples por μN
+SlipRatioWheel	alto	considera diferença entre velocidade da roda e do solo
+CombinedSlipWheel	alto	combina slip longitudinal e lateral
+LoadSensitiveWheel	alto	atrito depende da carga normal
+MeasuredTireModel	muito alto	curva calibrada com dados reais
+
+O simulador deve conseguir representar o caso em que o motor aplica torque demais, a roda começa a patinar e o robô acelera menos do que o esperado.
+
+Relação física essencial:
+
+F_max = μ * N
+
+Onde:
+
+F_max = força máxima transmissível pelo pneu
+μ = coeficiente de atrito
+N = força normal na roda
+
+Com fan ou sucção:
+
+N_total = peso + força_extra_de_aderência
+
+Isso é obrigatório para simular robôs como os das imagens anexadas.
+
+6.5. Módulo de normal/aderência/downforce
+
+Esse módulo merece existir separado, porque afeta diretamente o limite de tração, frenagem e curva.
+
+O usuário citou três casos:
+
+1. Nenhum sistema de aumento de normal.
+2. Sistema de sucção.
+3. Sistema de ventoinha/downforce.
+
+Então eu criaria um módulo chamado:
+
+NormalForceModule
+
+Modelos selecionáveis:
+
+Módulo	Descrição
+NoDownforce	apenas peso do robô
+ConstantDownforce	força extra constante
+FanDownforce	downforce gerado por uma ou mais ventoinhas
+SuctionDownforce	força por pressão negativa sob o robô
+SpeedDependentAero	força varia com velocidade do ar
+MeasuredDownforceCurve	curva real medida
+ClosedLoopDownforce	fan/sucção controlado por PWM
+Caso 1 — sem sistema
+N_total = m * g
+
+Distribuição nas rodas depende do centro de massa.
+
+Caso 2 — sucção
+
+Inspirado no RT61 APOLLON, que usa um mecanismo de sucção com motor DC dedicado e descreve uma estrutura de absorção de vibração no fan de sucção.
+
+Modelo simples:
+
+F_suction = constante
+
+Modelo intermediário:
+
+F_suction = f(pwm, rpm_fan, vazamento, altura_do_selo, velocidade)
+
+Modelo avançado:
+
+pressão interna da câmara
+vazamento lateral
+área efetiva de sucção
+tempo de resposta do fan
+perda por irregularidade da pista
+perda por inclinação/chassi
+
+Equação base:
+
+F_suction = ΔP * A_effective
+
+Onde:
+
+ΔP = diferença de pressão
+A_effective = área efetiva da câmara de sucção
+Caso 3 — ventoinha/downforce
+
+Inspirado no Aegis2023, que usa 4 motores DC BetaFPV como downforce fans.
+
+Modelo simples:
+
+F_fan = constante
+
+Modelo intermediário:
+
+F_fan = k * rpm²
+
+Modelo avançado:
+
+rpm do fan
+PWM do fan
+tensão da bateria
+corrente do fan
+curva empuxo x rpm
+posição dos fans no chassi
+momento gerado pelo downforce
+interferência com altura em relação ao solo
+
+Esse módulo deve devolver não só força vertical total, mas também distribuição de carga:
+
+normal_front_left
+normal_front_right
+normal_rear_left
+normal_rear_right
+
+Isso é importante porque um fan colocado mais à frente aumenta a normal nas rodas dianteiras ou pode alterar o comportamento em curva.
+
+6.6. Módulo de motor
+
+O simulador deve suportar vários tipos de motor.
+
+Modelos:
+
+Módulo	Uso
+IdealMotor	testes simples
+DcMotorSimple	motor DC com torque proporcional
+DcMotorElectrical	considera R, L, Ke, Kt
+CorelessDcMotor	baixa inércia, resposta rápida
+N20Motor	motor pequeno com redução
+MaxonDcMotor	motores de alto desempenho, como DCX10/DCX12
+BrushlessMotorSimple	BLDC simplificado
+BrushlessMotorFOC	BLDC com controle de corrente/FOC
+MeasuredMotorCurve	curva real medida em bancada
+
+Parâmetros para motor DC:
+
+resistência
+indutância
+constante de torque Kt
+constante de força contraeletromotriz Ke
+corrente sem carga
+corrente de stall
+rotação sem carga
+torque de stall
+inércia do rotor
+atrito interno
+limite térmico
+
+Equações básicas:
+
+V = R*i + L*di/dt + Ke*ω
+T = Kt*i
+
+O modelo avançado deve permitir saturação e limite térmico.
+
+6.7. Módulo de transmissão
+
+Entre motor e roda pode existir redução.
+
+Modelos:
+
+Módulo	Descrição
+DirectDrive	motor direto na roda
+GearboxFixedRatio	redução fixa
+GearboxWithEfficiency	redução com perda
+BeltDrive	transmissão por correia
+MeasuredTransmission	eficiência medida
+
+Parâmetros:
+
+relação de redução
+eficiência
+backlash
+atrito
+inércia equivalente
+limite de torque
+6.8. Módulo de driver eletrônico
+
+O driver não deve ser tratado como ideal. Ele afeta muito a resposta do robô.
+
+Modelos:
+
+Módulo	Descrição
+IdealHBridge	tensão aplicada ideal
+PwmHBridge	PWM com frequência e dead-time
+VoltageDropDriver	queda de tensão no driver
+CurrentLimitedDriver	limite de corrente
+ThermalLimitedDriver	redução por temperatura
+Tb6641Model	modelo específico aproximado
+Tb67h420Model	modelo específico aproximado
+EscBrushlessModel	ESC para BLDC
+CurrentControlDriver	controle de corrente
+
+Parâmetros:
+
+frequência PWM
+dead-time
+modo brake/coast
+queda de tensão
+limite de corrente
+limite térmico
+resistência equivalente
+resolução do PWM
+latência de comando
+
+O modo brake e coast é importante para seguidor de linha, principalmente em frenagens e curvas.
+
+6.9. Módulo de bateria e alimentação
+
+Modelos:
+
+Módulo	Descrição
+IdealBattery	tensão constante
+VoltageSagBattery	queda por resistência interna
+LipoBattery	modelo com células, SoC e resistência
+MeasuredBatteryCurve	curva real medida
+SeparateRailsPower	barramento de lógica e motor separados
+SharedRailPower	lógica e motor no mesmo barramento
+
+Parâmetros:
+
+número de células
+tensão nominal
+capacidade
+resistência interna
+estado de carga
+limite de corrente
+queda de tensão em aceleração
+recuperação de tensão
+
+Isso é importante porque os robôs citados usam baterias pequenas de 300 mAh, mas com alta demanda de corrente. O Aegis2023 usa LiPo 3S de 11,4 V e o APOLLON usa LiPo 4S de 15 V.
+
+6.10. Módulo de sensor de linha
+
+Esse é provavelmente o módulo mais importante para transferir dados para robô real.
+
+Modelos:
+
+Módulo	Descrição
+IdealLinePositionSensor	retorna posição ideal da linha
+PointReflectanceSensor	lê refletância em um ponto
+AreaReflectanceSensor	considera área real do sensor
+AnalogIrSensor	LED IR + fototransistor/fotodiodo
+SensorArray16	array de 16 sensores
+MeasuredSensorArray	modelo calibrado com dados reais
+NoisyAdcSensor	adiciona ruído e quantização ADC
+LatencySensor	atraso de leitura
+
+Parâmetros por sensor:
+
+posição x/y no robô
+ângulo
+área de leitura
+ganho
+offset
+ruído
+saturação
+resolução ADC
+tempo de exposição/amostragem
+crosstalk entre sensores
+influência da altura
+influência da iluminação ambiente
+
+Pipeline recomendado:
+
+posição do sensor no mundo
+→ área de leitura sobre a pista
+→ refletância média
+→ resposta óptica
+→ ruído
+→ filtro
+→ quantização ADC
+→ valor entregue ao controlador
+
+Para os robôs de referência, isso é coerente porque ambos usam 16 sensores infravermelhos de linha.
+
+6.11. Módulo de encoder
+
+Modelos:
+
+Módulo	Descrição
+IdealEncoder	velocidade perfeita
+QuantizedEncoder	ticks discretos
+NoisyEncoder	ruído e jitter
+MagneticEncoder	modelo para encoder magnético
+MissedPulseEncoder	perda de pulsos em alta rotação
+
+Parâmetros:
+
+resolução
+ticks por volta
+latência
+ruído
+jitter
+sentido de rotação
+erro de montagem
+6.12. Módulo de IMU/giroscópio
+
+Modelos:
+
+Módulo	Descrição
+IdealGyro	yaw rate perfeito
+NoisyGyro	ruído gaussiano
+BiasDriftGyro	drift de bias
+DigitalImuModel	amostragem discreta e filtro
+MeasuredImuModel	calibrado com dados reais
+
+Parâmetros:
+
+frequência de amostragem
+ruído
+bias
+drift térmico
+filtro interno
+latência
+saturação
+6.13. Módulo de controle
+
+Controladores suportados:
+
+Tipo	Descrição
+BuiltInPid	PID interno em Rust
+BuiltInPurePursuit	controle geométrico
+BuiltInStanley	controle lateral
+BuiltInSpeedProfile	perfil de velocidade
+NativePlugin	plugin nativo compilado
+ScriptedController	futuro, para protótipo
+ReplayController	reproduz comandos gravados
+
+Entrada do controlador:
+
+tempo
+dt
+sensores de linha
+encoder esquerdo/direito
+gyro
+aceleração
+tensão da bateria
+estado estimado opcional
+
+Saída do controlador:
+
+pwm_motor_esquerdo
+pwm_motor_direito
+pwm_fan/sucção opcional
+modo brake/coast
+dados de debug
+6.14. Módulo de estimador/odometria
+
+Como robôs avançados usam segunda volta, mapa e atalhos, o simulador deve prever isso.
+
+Modelos:
+
+Módulo	Descrição
+NoneEstimator	sem estimador
+WheelOdometry	odometria por encoders
+GyroWheelOdometry	encoder + gyro
+LineCorrectedOdometry	corrige usando linha
+ParticleLocalization	futuro
+GroundTruthEstimator	entrega estado real para debug
+
+O APOLLON menciona corrida com mapa, virtual line trace, out-in-out e melhor estimativa de posição. O Aegis2023 também menciona segunda volta com mapa, rotação dos pneus e giroscópio para estimar posição.
+
+6.15. Módulo de ambiente
+
+Modelos:
+
+Módulo	Descrição
+IdealEnvironment	sem perturbação
+LightingEnvironment	iluminação afeta sensores
+TemperatureEnvironment	afeta motor, bateria e pneu
+SurfaceDustEnvironment	sujeira na pista
+RandomDisturbanceEnvironment	pequenas perturbações
+AirflowEnvironment	futuro, para fan/downforce
+6.16. Módulo de colisão e saída de pista
+
+Modelos:
+
+Módulo	Descrição
+NoCollision	ignora colisões
+BoundaryCheck	detecta saída da pista
+RobotFootprintCollision	colisão por envelope do robô
+SensorBarCollision	colisão da barra de sensor
+FullGeometryCollision	colisão por geometria completa
+
+Para começar, eu usaria colisão simples por envelope 2D.
+
+6.17. Módulo de telemetria
+
+Deve registrar:
+
+tempo
+posição real
+posição estimada
+velocidade
+yaw
+yaw rate
+PWM
+corrente dos motores
+tensão da bateria
+torque
+força nas rodas
+slip ratio
+normal por roda
+sensor raw
+sensor filtrado
+encoder
+gyro
+estado do controlador
+eventos
+
+Formatos:
+
+.rrlog  → binário/replay
+.csv    → análise externa
+.json   → apenas resumo/configuração
+
+JSON não deve ser usado para log de alta frequência.
+
+7. Estrutura inicial dos módulos no Rust
+
+A ideia em Rust seria criar traits para cada família de módulo.
+
+Exemplo conceitual:
+
+pub trait MotorModel {
+    fn step(&mut self, input: MotorInput, dt_us: u32) -> MotorOutput;
+}
+
+pub trait TireModel {
+    fn compute_forces(&mut self, input: TireInput) -> TireForces;
+}
+
+pub trait SensorModel {
+    fn sample(&mut self, input: SensorInput, t_us: u64) -> SensorOutput;
+}
+
+pub trait NormalForceModel {
+    fn compute_normal_forces(&mut self, input: NormalForceInput) -> NormalForceOutput;
+}
+
+pub trait BatteryModel {
+    fn step(&mut self, input: BatteryInput, dt_us: u32) -> BatteryOutput;
+}
+
+O importante é que cada módulo tenha interface própria e possa ser trocado por configuração.
+
+8. Exemplo de configuração de robô
+
+Um robô simples:
+
+{
+  "robot_schema": "rtsim-robot-v1",
+  "name": "Simple N20 Robot",
+  "chassis": {
+    "model": "RigidBody2DChassis",
+    "mass_g": 180,
+    "inertia_kg_m2": 0.00045,
+    "center_of_mass_mm": [0, 0]
+  },
+  "normal_force": {
+    "model": "NoDownforce"
+  },
+  "drivetrain": {
+    "type": "DifferentialDrive4Wheel",
+    "wheel_radius_mm": 10,
+    "wheel_width_mm": 10
+  },
+  "tire": {
+    "model": "CoulombFrictionWheel",
+    "mu_longitudinal": 1.2,
+    "mu_lateral": 1.0
+  },
+  "motors": {
+    "left": {
+      "model": "N20Motor",
+      "gear_ratio": 30
+    },
+    "right": {
+      "model": "N20Motor",
+      "gear_ratio": 30
+    }
+  },
+  "driver": {
+    "model": "PwmHBridge",
+    "pwm_frequency_hz": 20000,
+    "mode": "brake"
+  },
+  "battery": {
+    "model": "LipoBattery",
+    "cells": 2,
+    "capacity_mah": 300,
+    "internal_resistance_ohm": 0.08
+  },
+  "line_sensor": {
+    "model": "SensorArray16",
+    "count": 16,
+    "adc_bits": 12
+  }
+}
+
+Um robô avançado com fan:
+
+{
+  "normal_force": {
+    "model": "FanDownforce",
+    "fans": [
+      {
+        "position_mm": [50, 60],
+        "motor_model": "BrushlessMotorSimple",
+        "thrust_curve": "measured_curve",
+        "max_force_n": 2.5
+      },
+      {
+        "position_mm": [50, -60],
+        "motor_model": "BrushlessMotorSimple",
+        "thrust_curve": "measured_curve",
+        "max_force_n": 2.5
+      }
+    ]
+  }
+}
+
+Um robô avançado com sucção:
+
+{
+  "normal_force": {
+    "model": "SuctionDownforce",
+    "chamber_area_m2": 0.012,
+    "max_delta_pressure_pa": 1500,
+    "leakage_model": "GapLeakage",
+    "fan_motor": {
+      "model": "DcMotorElectrical"
+    }
+  }
+}

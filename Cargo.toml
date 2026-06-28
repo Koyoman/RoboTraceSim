@@ -1,0 +1,8 @@
+[package]
+name = "robotrace-sim"
+version = "0.1.0"
+edition = "2021"
+description = "Robotrace Sim v0.1 headless deterministic fixed-step simulator"
+license = "MIT"
+
+[dependencies]

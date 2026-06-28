@@ -1,0 +1,22 @@
+{
+  "track_schema": "rtsim-track-v1",
+  "name": "Simple Vector S-Curve",
+  "model": "VectorTrack",
+  "line_width_mm": 19,
+  "base_reflectance": 0.86,
+  "line_reflectance": 0.08,
+  "surface_mu": 1.20,
+  "centerline_m": [
+    [0.0, 0.00],
+    [0.5, 0.00],
+    [1.0, 0.04],
+    [1.5, 0.10],
+    [2.0, 0.10],
+    [2.5, 0.03],
+    [3.0, -0.04],
+    [3.5, -0.08],
+    [4.0, -0.02],
+    [4.5, 0.05],
+    [5.0, 0.00]
+  ]
+}
