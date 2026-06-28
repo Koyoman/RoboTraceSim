@@ -1,0 +1,112 @@
+{
+  "robot_schema": "rtsim-robot-v3",
+  "name": "Simple N20 PID Robot v0.3 SuctionDownforce",
+  "chassis": {
+    "model": "RigidBody2DChassis",
+    "mass_g": 180,
+    "inertia_kg_m2": 0.00045,
+    "center_of_mass_mm": [0, 0],
+    "length_mm": 120,
+    "width_mm": 90
+  },
+  "normal_force": {
+    "model": "SuctionDownforce",
+    "default_pwm": 0.80,
+    "position_mm": [0, 0],
+    "chamber_area_m2": 0.0048,
+    "max_delta_pressure_pa": 520,
+    "max_force_n": 2.2,
+    "max_current_a": 1.8,
+    "leakage_factor": 0.10,
+    "response_time_s": 0.055,
+    "force_curve": [[0.0, 0.0], [0.35, 0.15], [0.60, 0.75], [0.80, 1.45], [1.0, 2.20]]
+  },
+  "drivetrain": {
+    "type": "DifferentialDrive4Wheel",
+    "wheel_radius_mm": 10,
+    "wheel_width_mm": 10,
+    "track_width_mm": 82,
+    "wheelbase_mm": 84,
+    "wheel_inertia_g_cm2": 1.0
+  },
+  "tire": {
+    "model": "SlipRatioWheel",
+    "mu_longitudinal": 1.20,
+    "mu_lateral": 1.00,
+    "rolling_resistance": 0.015,
+    "slip_velocity_epsilon_m_s": 0.05
+  },
+  "motors": {
+    "left": {
+      "model": "DcMotorSimple",
+      "gear_ratio": 30,
+      "efficiency": 0.75,
+      "no_load_rpm": 1800,
+      "stall_torque_mnm": 5.0,
+      "stall_current_a": 1.6
+    },
+    "right": {
+      "model": "DcMotorSimple",
+      "gear_ratio": 30,
+      "efficiency": 0.75,
+      "no_load_rpm": 1800,
+      "stall_torque_mnm": 5.0,
+      "stall_current_a": 1.6
+    }
+  },
+  "driver": {
+    "model": "PwmHBridge",
+    "pwm_frequency_hz": 20000,
+    "mode": "brake",
+    "voltage_drop_v": 0.2,
+    "pwm_resolution_bits": 10,
+    "command_deadband": 0.001,
+    "current_limit_a": 3.0
+  },
+  "battery": {
+    "model": "VoltageSagBattery",
+    "nominal_voltage_v": 7.4,
+    "full_voltage_v": 7.4,
+    "empty_voltage_v": 6.4,
+    "cells": 2,
+    "capacity_mah": 300,
+    "internal_resistance_ohm": 0.08,
+    "initial_soc": 1.0,
+    "current_limit_a": 60.0
+  },
+  "line_sensor": {
+    "model": "NoisyAdcSensor",
+    "count": 16,
+    "width_mm": 72,
+    "forward_offset_mm": 55,
+    "adc_bits": 12,
+    "gain": 1.0,
+    "offset": 0.0,
+    "reflectance_noise_std": 0.01,
+    "adc_noise_lsb": 1.0,
+    "seed": 1371
+  },
+  "encoder": {
+    "model": "QuantizedEncoder",
+    "ticks_per_rev": 360,
+    "invert_left": false,
+    "invert_right": false
+  },
+  "gyro": {
+    "model": "NoisyGyro",
+    "noise_std_rad_s": 0.01,
+    "bias_rad_s": 0.0,
+    "saturation_rad_s": 34.9,
+    "seed": 2467
+  },
+  "controller": {
+    "model": "BuiltInPid",
+    "kp": 13.0,
+    "ki": 0.0,
+    "kd": 0.035,
+    "base_pwm": 0.34,
+    "max_pwm": 0.90,
+    "target_position_mm": 0.0,
+    "downforce_pwm": 0.80
+  }
+}

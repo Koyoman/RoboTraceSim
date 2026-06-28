@@ -1,0 +1,23 @@
+{
+  "rtsim_schema": "rtsim-project-v1",
+  "name": "basic-v0.3-suction-demo",
+  "robot": "robot_suction.json",
+  "track": "track.json",
+  "time": {
+    "physics_dt_us": 500,
+    "controller_period_us": 1000,
+    "sensor_period_us": 500,
+    "imu_period_us": 500,
+    "encoder_period_us": 500,
+    "log_period_us": 1000,
+    "render_period_us": 16667
+  },
+  "simulation": {
+    "duration_s": 10.0,
+    "start_pose_m": [0.0, 0.035, 0.0]
+  },
+  "log": {
+    "csv": "resultado_suction.csv",
+    "replay": "resultado_suction.rtlog"
+  }
+}

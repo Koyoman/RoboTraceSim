@@ -6,6 +6,7 @@ use crate::sensor::SensorOutput;
 pub struct ControllerOutput {
     pub pwm_left: f64,
     pub pwm_right: f64,
+    pub pwm_downforce: f64,
     pub error_m: f64,
     pub correction: f64,
 }
@@ -24,7 +25,12 @@ pub struct BuiltInPid {
 
 impl BuiltInPid {
     pub fn new(cfg: PidConfig) -> Self {
-        Self { cfg, integral: 0.0, prev_error: 0.0, initialized: false }
+        Self {
+            cfg,
+            integral: 0.0,
+            prev_error: 0.0,
+            initialized: false,
+        }
     }
 }
 
@@ -42,10 +48,25 @@ impl Controller for BuiltInPid {
 
         // Positive error means the line is to the left of the sensor center.
         // The robot turns left by reducing the left PWM and increasing the right PWM.
-        let correction = self.cfg.kp * error + self.cfg.ki * self.integral + self.cfg.kd * derivative;
-        let pwm_left = clamp(self.cfg.base_pwm - correction, -self.cfg.max_pwm, self.cfg.max_pwm);
-        let pwm_right = clamp(self.cfg.base_pwm + correction, -self.cfg.max_pwm, self.cfg.max_pwm);
+        let correction =
+            self.cfg.kp * error + self.cfg.ki * self.integral + self.cfg.kd * derivative;
+        let pwm_left = clamp(
+            self.cfg.base_pwm - correction,
+            -self.cfg.max_pwm,
+            self.cfg.max_pwm,
+        );
+        let pwm_right = clamp(
+            self.cfg.base_pwm + correction,
+            -self.cfg.max_pwm,
+            self.cfg.max_pwm,
+        );
 
-        ControllerOutput { pwm_left, pwm_right, error_m: error, correction }
+        ControllerOutput {
+            pwm_left,
+            pwm_right,
+            pwm_downforce: clamp(self.cfg.downforce_pwm, 0.0, 1.0),
+            error_m: error,
+            correction,
+        }
     }
 }

@@ -1,42 +1,39 @@
-# Robotrace Sim v0.1 — Headless
+# Robotrace Sim v0.4 — Interface única
 
-Primeira implementação do núcleo headless do simulador de seguidores de linha.
+Simulador de robôs seguidores de linha em Rust com núcleo físico determinístico fixed-step, execução por terminal e primeira interface gráfica integrada em `egui/eframe`.
 
-Esta versão ainda não possui interface gráfica. O objetivo é validar o formato `.rtsim`, a leitura de `robot.json` e `track.json`, a simulação determinística fixed-step e a execução por terminal.
+A v0.4 preserva os recursos das versões anteriores e adiciona uma aplicação única com:
 
-## O que está implementado
+- Home
+- Editor de pista
+- Editor de robô
+- Simulador visual
+- Replay viewer
 
-- Projeto `.rtsim` com JSON versionado.
-- Leitura de `robot.json`.
-- Leitura de `track.json`.
-- Simulação fixed-step com tempo interno em microssegundos.
-- Scheduler simples para física, sensores, controlador e log.
-- Modelo de pista vetorial simples por polilinha (`VectorTrack`).
-- Consulta de refletância da pista para sensores.
-- Consulta de atrito de superfície.
-- Sensor de linha simples com array de N sensores (`SensorArray16`).
-- Motor DC simples com curva linear torque x velocidade (`DcMotorSimple`).
-- Roda com limite por atrito de Coulomb (`CoulombFrictionWheel`).
-- Modelo de normal `NoDownforce` (`N = m*g`, distribuído entre lados esquerdo/direito).
-- Controlador PID built-in.
-- Log CSV.
-- Execução por terminal.
-- Benchmark por terminal.
-
-## O que ficou como próximo passo
-
-- UI com egui/eframe.
-- Replay binário `.rrlog`.
-- Comando `batch` completo.
-- Comando `export` completo.
-- Modelos avançados de motor, bateria, driver, sensor, slip ratio, fan/downforce e sucção.
-- Colisão/saída de pista.
-- Comparação com dados reais.
+A UI não substitui o núcleo de simulação: ela apenas configura, visualiza e aciona comandos. O core continua podendo rodar de forma automatizada por linha de comando.
 
 ## Compilar
 
 ```bash
 cargo build --release
+```
+
+A interface gráfica é a feature padrão. Para compilar apenas o núcleo CLI, sem baixar `eframe`:
+
+```bash
+cargo build --release --no-default-features
+```
+
+## Abrir a interface gráfica
+
+```bash
+cargo run --release
+```
+
+ou:
+
+```bash
+cargo run --release -- ui
 ```
 
 ## Rodar simulação headless
@@ -45,22 +42,10 @@ cargo build --release
 cargo run --release -- run examples/basic/projeto.rtsim --headless --duration 10s
 ```
 
-Ou, depois de compilar:
+Com CSV e replay explícitos:
 
 ```bash
-./target/release/robotrace-sim run examples/basic/projeto.rtsim --headless --duration 10s
-```
-
-Por padrão, o exemplo escreve:
-
-```text
-examples/basic/resultado.csv
-```
-
-Para escolher outro CSV:
-
-```bash
-robotrace-sim run examples/basic/projeto.rtsim --headless --duration 10s --output resultado.csv
+cargo run --release -- run examples/basic/projeto.rtsim --headless --duration 10s --csv examples/basic/resultado.csv --replay examples/basic/resultado.rtlog
 ```
 
 ## Benchmark
@@ -69,18 +54,75 @@ robotrace-sim run examples/basic/projeto.rtsim --headless --duration 10s --outpu
 cargo run --release -- benchmark examples/basic/projeto.rtsim --duration 10s --physics-dt-us 500
 ```
 
+## Exportar replay para CSV
+
+```bash
+cargo run --release -- export examples/basic/resultado.rtlog --format csv --output examples/basic/resultado_exportado.csv
+```
+
+## Recursos já implementados
+
+### Base v0.1
+
+- Projeto `.rtsim` com JSON versionado.
+- Leitura de `robot.json` e `track.json`.
+- Simulação fixed-step com tempo interno em microssegundos.
+- Scheduler para física, sensores, controlador, IMU, encoder e log.
+- Pista vetorial simples (`VectorTrack`).
+- Consulta de refletância e atrito da pista.
+- Sensor de linha com array de N sensores.
+- Motor DC simples.
+- Modelo diferencial 2D.
+- Controlador PID built-in.
+- Log CSV.
+- Execução por terminal.
+- Benchmark.
+
+### Realismo básico v0.2
+
+- `SlipRatioWheel`.
+- `VoltageSagBattery`.
+- `PwmHBridge` com PWM quantizado, queda de tensão, limite de corrente e brake/coast.
+- `QuantizedEncoder`.
+- `NoisyGyro`.
+- `NoisyAdcSensor`.
+- Replay binário `.rtlog` com exportação CSV.
+
+### Downforce/sucção v0.3
+
+- `NormalForceModel` modular.
+- `FanDownforce` com múltiplos fans, posição no chassi e curvas PWM → força.
+- `SuctionDownforce` com área de câmara, pressão diferencial, vazamento e resposta dinâmica.
+- Distribuição de normal nas quatro rodas.
+- Efeito da normal no atrito por `Fmax = μ * N`.
+- PWM de fan/sucção via controlador.
+- Consumo elétrico do sistema de downforce somado à bateria.
+- Replay binário v3 (`RTSRPL03`) com campos de normal/downforce.
+
+### Interface única v0.4
+
+- `src/ui.rs` com app `egui/eframe`.
+- Home para carregar, criar e salvar projetos.
+- Editor de pista com canvas vetorial e tabela de pontos.
+- Editor de robô com parâmetros físicos, eletrônicos, sensores, controle e downforce.
+- `SimulationSession` incremental para visualização sem duplicar a física.
+- Simulador visual com play/pause/step e painel de telemetria.
+- Replay viewer com carregamento `.rtlog`, slider temporal, trajetória e exportação CSV.
+
 ## Formato do projeto `.rtsim`
 
 ```json
 {
   "rtsim_schema": "rtsim-project-v1",
-  "name": "basic-headless-demo",
+  "name": "basic-v0.4-demo",
   "robot": "robot.json",
   "track": "track.json",
   "time": {
     "physics_dt_us": 500,
     "controller_period_us": 1000,
     "sensor_period_us": 500,
+    "imu_period_us": 500,
+    "encoder_period_us": 500,
     "log_period_us": 1000,
     "render_period_us": 16667
   },
@@ -89,23 +131,19 @@ cargo run --release -- benchmark examples/basic/projeto.rtsim --duration 10s --p
     "start_pose_m": [0.0, 0.035, 0.0]
   },
   "log": {
-    "csv": "resultado.csv"
+    "csv": "resultado.csv",
+    "replay": "resultado.rtlog"
   }
 }
 ```
 
 ## Observações técnicas
 
-A v0.1 usa apenas a biblioteca padrão do Rust. Isso mantém o projeto fácil de compilar em qualquer ambiente, sem dependências externas.
+- A física continua determinística e desacoplada da UI.
+- A UI usa `egui::Painter` para renderização inicial, conforme a especificação.
+- O parser JSON próprio foi mantido para preservar a base sem `serde`, mas a serialização manual da UI já salva os arquivos principais.
+- O comando `batch` ainda permanece como próximo passo.
 
-O parser JSON incluído é propositalmente mínimo, suficiente para os arquivos de configuração da v0.1. Em versões futuras, vale trocar por `serde`/`serde_json` quando o projeto passar a aceitar schemas maiores e validação mais detalhada.
+## Limitação conhecida deste pacote
 
-A dinâmica 2D usa corpo rígido simplificado:
-
-- `x`, `y`, `yaw` no mundo.
-- `vx`, `vy`, `yaw_rate` no corpo.
-- Força longitudinal por roda limitada por `Fmax = mu * N`.
-- Força lateral simples para reduzir escorregamento lateral.
-- Torque em yaw por diferença de força entre as rodas.
-
-A intenção é manter a arquitetura modular desde o começo, mesmo usando modelos simples.
+O ambiente usado para montar esta versão não possui `cargo`/`rustc` instalado, então não foi possível executar `cargo check` ou `cargo test` aqui. A revisão foi estática e os JSONs de exemplo foram validados com `python -m json.tool`.

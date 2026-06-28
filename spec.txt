@@ -90,10 +90,10 @@ Exemplos desejados:
 
 robotrace-sim run projeto.rtsim
 robotrace-sim run projeto.rtsim --headless
-robotrace-sim run projeto.rtsim --duration 10s --output resultado.rrlog
+robotrace-sim run projeto.rtsim --duration 10s --output resultado.rtlog
 robotrace-sim batch ./experimentos/*.rtsim --output ./resultados/
 robotrace-sim benchmark projeto.rtsim --physics-dt-us 500
-robotrace-sim export resultado.rrlog --format csv
+robotrace-sim export resultado.rtlog --format csv
 
 Isso permite testar vários robôs, controladores e parâmetros automaticamente.
 
@@ -666,7 +666,7 @@ eventos
 
 Formatos:
 
-.rrlog  → binário/replay
+.rtlog  → binário/replay
 .csv    → análise externa
 .json   → apenas resumo/configuração
 

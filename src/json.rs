@@ -43,6 +43,13 @@ impl JsonValue {
         })
     }
 
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            JsonValue::Bool(v) => Some(*v),
+            _ => None,
+        }
+    }
+
     pub fn as_array(&self) -> Option<&[JsonValue]> {
         match self {
             JsonValue::Array(v) => Some(v),
@@ -59,7 +66,10 @@ pub struct JsonError {
 
 impl JsonError {
     fn new(pos: usize, message: impl Into<String>) -> Self {
-        Self { pos, message: message.into() }
+        Self {
+            pos,
+            message: message.into(),
+        }
     }
 }
 
@@ -72,11 +82,17 @@ impl fmt::Display for JsonError {
 impl std::error::Error for JsonError {}
 
 pub fn parse_json(input: &str) -> Result<JsonValue, JsonError> {
-    let mut parser = Parser { bytes: input.as_bytes(), pos: 0 };
+    let mut parser = Parser {
+        bytes: input.as_bytes(),
+        pos: 0,
+    };
     let value = parser.parse_value()?;
     parser.skip_ws();
     if parser.pos != parser.bytes.len() {
-        return Err(JsonError::new(parser.pos, "trailing characters after JSON value"));
+        return Err(JsonError::new(
+            parser.pos,
+            "trailing characters after JSON value",
+        ));
     }
     Ok(value)
 }
@@ -113,7 +129,10 @@ impl<'a> Parser<'a> {
             Some(b'[') => self.parse_array(),
             Some(b'{') => self.parse_object(),
             Some(b'-' | b'0'..=b'9') => self.parse_number(),
-            Some(other) => Err(JsonError::new(self.pos, format!("unexpected byte {:?}", other as char))),
+            Some(other) => Err(JsonError::new(
+                self.pos,
+                format!("unexpected byte {:?}", other as char),
+            )),
             None => Err(JsonError::new(self.pos, "unexpected end of input")),
         }
     }
@@ -137,7 +156,9 @@ impl<'a> Parser<'a> {
             match b {
                 b'\"' => return Ok(out),
                 b'\\' => {
-                    let esc = self.bump().ok_or_else(|| JsonError::new(self.pos, "unfinished escape"))?;
+                    let esc = self
+                        .bump()
+                        .ok_or_else(|| JsonError::new(self.pos, "unfinished escape"))?;
                     match esc {
                         b'\"' => out.push('\"'),
                         b'\\' => out.push('\\'),
@@ -167,7 +188,9 @@ impl<'a> Parser<'a> {
     fn parse_hex4(&mut self) -> Result<u16, JsonError> {
         let mut value = 0u16;
         for _ in 0..4 {
-            let b = self.bump().ok_or_else(|| JsonError::new(self.pos, "short unicode escape"))?;
+            let b = self
+                .bump()
+                .ok_or_else(|| JsonError::new(self.pos, "short unicode escape"))?;
             let digit = match b {
                 b'0'..=b'9' => (b - b'0') as u16,
                 b'a'..=b'f' => (b - b'a' + 10) as u16,
@@ -261,7 +284,10 @@ impl<'a> Parser<'a> {
                 self.bump();
             }
             if self.pos == frac_start {
-                return Err(JsonError::new(self.pos, "expected digits after decimal point"));
+                return Err(JsonError::new(
+                    self.pos,
+                    "expected digits after decimal point",
+                ));
             }
         }
         if matches!(self.peek(), Some(b'e' | b'E')) {
@@ -279,7 +305,9 @@ impl<'a> Parser<'a> {
         }
         let s = std::str::from_utf8(&self.bytes[start..self.pos])
             .map_err(|_| JsonError::new(start, "number is not UTF-8"))?;
-        let number = s.parse::<f64>().map_err(|_| JsonError::new(start, "invalid f64 number"))?;
+        let number = s
+            .parse::<f64>()
+            .map_err(|_| JsonError::new(start, "invalid f64 number"))?;
         Ok(JsonValue::Number(number))
     }
 }
