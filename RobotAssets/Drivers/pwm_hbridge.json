@@ -1,0 +1,13 @@
+{
+  "driver_profile_schema": "rtsim-driver-profile-v1",
+  "name": "PWM H-Bridge",
+  "driver": {
+    "model": "PwmHBridge",
+    "pwm_frequency_hz": 20000.0,
+    "mode": "brake",
+    "voltage_drop_v": 0.2,
+    "pwm_resolution_bits": 10,
+    "command_deadband": 0.001,
+    "current_limit_a": 3.0
+  }
+}

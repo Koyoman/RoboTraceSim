@@ -1,0 +1,16 @@
+{
+  "line_sensor_profile_schema": "rtsim-line-sensor-profile-v1",
+  "name": "16 Line Sensor",
+  "line_sensor": {
+    "model": "NoisyAdcSensor",
+    "count": 16,
+    "width_mm": 72.0,
+    "forward_offset_mm": 55.0,
+    "adc_bits": 12,
+    "gain": 1.0,
+    "offset": 0.0,
+    "reflectance_noise_std": 0.01,
+    "adc_noise_lsb": 1.0,
+    "seed": 1371
+  }
+}

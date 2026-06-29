@@ -1,0 +1,15 @@
+{
+  "battery_profile_schema": "rtsim-battery-profile-v1",
+  "name": "2S LiPo 7.4V",
+  "battery": {
+    "model": "VoltageSagBattery",
+    "nominal_voltage_v": 7.4,
+    "full_voltage_v": 7.4,
+    "empty_voltage_v": 6.4,
+    "cells": 2,
+    "capacity_mah": 300.0,
+    "internal_resistance_ohm": 0.08,
+    "initial_soc": 1.0,
+    "current_limit_a": 60.0
+  }
+}

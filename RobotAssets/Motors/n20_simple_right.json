@@ -1,0 +1,12 @@
+{
+  "motor_profile_schema": "rtsim-motor-profile-v1",
+  "name": "N20 Simple Right",
+  "motor": {
+    "model": "DcMotorSimple",
+    "gear_ratio": 30.0,
+    "efficiency": 0.75,
+    "no_load_rpm": 1800.0,
+    "stall_torque_mnm": 5.0,
+    "stall_current_a": 1.6
+  }
+}

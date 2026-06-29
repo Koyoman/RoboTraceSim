@@ -1,0 +1,11 @@
+{
+  "tire_profile_schema": "rtsim-tire-profile-v1",
+  "name": "Default Tire",
+  "tire": {
+    "model": "SlipRatioWheel",
+    "mu_longitudinal": 1.2,
+    "mu_lateral": 1.0,
+    "rolling_resistance": 0.015,
+    "slip_velocity_epsilon_m_s": 0.05
+  }
+}

@@ -7,11 +7,14 @@ mod gui {
     };
     use crate::config::load_project;
     use crate::config::{
-        apply_surface_profile, load_surface_profile_from_file, load_track_from_file,
-        refresh_track_cache, surface_profile_from_track, BatteryConfig, ChassisConfig,
-        DrivetrainConfig, EncoderConfig, FanConfig, GyroConfig, LineSensorConfig, LoadedConfig,
-        MotorConfig, NormalForceConfig, PidConfig, ProjectConfig, RobotConfig, SurfaceProfile,
-        TimeConfig, TireConfig, TrackConfig,
+        apply_surface_profile, load_battery_profile_from_file, load_driver_profile_from_file,
+        load_fan_profile_from_file, load_line_sensor_profile_from_file, load_motor_profile_from_file,
+        load_robot_from_file, load_surface_profile_from_file, load_tire_profile_from_file,
+        load_track_from_file, refresh_track_cache, surface_profile_from_track, BatteryConfig,
+        BatteryProfile, ChassisConfig, DriverConfig, DriverProfile, DrivetrainConfig, EncoderConfig, FanConfig,
+        FanProfile, GyroConfig, LineSensorConfig, LineSensorProfile, LoadedConfig, MotorConfig,
+        MotorProfile, NormalForceConfig, PidConfig, ProjectConfig, RobotConfig, SurfaceProfile,
+        TimeConfig, TireConfig, TireProfile, TrackConfig,
     };
     use crate::math::{Pose2, Vec2};
     use crate::replay::{export_replay_to_csv, load_replay_samples, ReplayData};
@@ -55,6 +58,39 @@ mod gui {
         Load,
         Save,
         SaveAs,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RobotFileCommand {
+        None,
+        New,
+        Load,
+        Save,
+        SaveAs,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ComponentAssetKind {
+        MotorLeft,
+        MotorRight,
+        Driver,
+        Battery,
+        Tire,
+        LineSensor,
+        Fan,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ComponentAssetCommandKind {
+        Load,
+        Save,
+        SaveAs,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct ComponentAssetCommand {
+        kind: ComponentAssetKind,
+        command: ComponentAssetCommandKind,
     }
 
     #[derive(Debug, Default, Clone, Copy)]
@@ -110,6 +146,16 @@ mod gui {
         replay_path_text: String,
         track_file_path_text: String,
         track_dirty: bool,
+        robot_file_path_text: String,
+        robot_dirty: bool,
+        motor_left_asset_path_text: String,
+        motor_right_asset_path_text: String,
+        driver_asset_path_text: String,
+        battery_asset_path_text: String,
+        tire_asset_path_text: String,
+        line_sensor_asset_path_text: String,
+        fan_asset_path_text: String,
+        selected_fan_asset_index: usize,
         surface_profile_path_text: String,
         surface_profile_dirty: bool,
         status: String,
@@ -144,6 +190,16 @@ mod gui {
                 replay_path_text: "examples/basic/resultado.rtlog".to_string(),
                 track_file_path_text: "examples/basic/track.json".to_string(),
                 track_dirty: false,
+                robot_file_path_text: "examples/basic/robot.json".to_string(),
+                robot_dirty: false,
+                motor_left_asset_path_text: "RobotAssets/Motors/n20_simple_left.json".to_string(),
+                motor_right_asset_path_text: "RobotAssets/Motors/n20_simple_right.json".to_string(),
+                driver_asset_path_text: "RobotAssets/Drivers/pwm_hbridge.json".to_string(),
+                battery_asset_path_text: "RobotAssets/Batteries/2s_lipo_7400mv.json".to_string(),
+                tire_asset_path_text: "RobotAssets/Tires/default_tire.json".to_string(),
+                line_sensor_asset_path_text: "RobotAssets/LineSensors/line_sensor_16.json".to_string(),
+                fan_asset_path_text: "RobotAssets/Fans/downforce_fan.json".to_string(),
+                selected_fan_asset_index: 0,
                 surface_profile_path_text: "examples/profiles/rob_trace_official.json".to_string(),
                 surface_profile_dirty: false,
                 status: "Abra um projeto .rtsim ou use o exemplo básico.".to_string(),
@@ -182,10 +238,14 @@ mod gui {
                     self.project_path_text = path.display().to_string();
                     self.sim_duration_s = cfg.project.duration_s;
                     self.replay_path_text = default_replay_path(&cfg).display().to_string();
-                    self.track_file_path_text =
-                        resolve_child_path(&cfg.project_path, &cfg.project.track_path)
-                            .display()
-                            .to_string();
+                    self.track_file_path_text = Self::path_text(&resolve_child_path(
+                        &cfg.project_path,
+                        &cfg.project.track_path,
+                    ));
+                    self.robot_file_path_text = Self::path_text(&resolve_child_path(
+                        &cfg.project_path,
+                        &cfg.project.robot_path,
+                    ));
                     self.surface_profile_path_text = cfg
                         .track
                         .parametric
@@ -197,6 +257,7 @@ mod gui {
                         .display()
                         .to_string();
                     self.track_dirty = false;
+                    self.robot_dirty = false;
                     self.surface_profile_dirty = false;
                     self.selected_track_point = None;
                     self.track_view_zoom = 1.0;
@@ -219,6 +280,7 @@ mod gui {
             match result {
                 Ok(()) => {
                     self.track_dirty = false;
+                    self.robot_dirty = false;
                     self.set_status("Projeto, robô e pista salvos.");
                 }
                 Err(err) => self.set_status(format!("Falha ao salvar: {err}")),
@@ -937,657 +999,395 @@ mod gui {
         }
 
         fn show_robot_editor(&mut self, ui: &mut egui::Ui) {
-            ui.heading("Editor de robô");
-            let mut save_clicked = false;
+            let mut robot_file_command = RobotFileCommand::None;
+            let mut component_asset_command: Option<ComponentAssetCommand> = None;
             let mut invalidate_sim = false;
+            let mut status_to_set: Option<String> = None;
+            let mut robot_dirty = self.robot_dirty;
+            let mut robot_file_path_text = self.robot_file_path_text.clone();
+            let mut motor_left_asset_path_text = self.motor_left_asset_path_text.clone();
+            let mut motor_right_asset_path_text = self.motor_right_asset_path_text.clone();
+            let mut driver_asset_path_text = self.driver_asset_path_text.clone();
+            let mut battery_asset_path_text = self.battery_asset_path_text.clone();
+            let mut tire_asset_path_text = self.tire_asset_path_text.clone();
+            let mut line_sensor_asset_path_text = self.line_sensor_asset_path_text.clone();
+            let mut fan_asset_path_text = self.fan_asset_path_text.clone();
+            let mut selected_fan_asset_index = self.selected_fan_asset_index;
+
             if let Some(cfg) = self.cfg.as_mut() {
-                ui.horizontal(|ui| {
-                    ui.label("Nome");
-                    if ui.text_edit_singleline(&mut cfg.robot.name).changed() {
-                        invalidate_sim = true;
-                    }
-                    ui.label("Schema");
-                    ui.text_edit_singleline(&mut cfg.robot.schema);
-                });
+                let full_size = ui.available_size_before_wrap();
+                let total_width = full_size.x;
+                let total_height = full_size.y.max(520.0);
+                let right_width = 430.0;
+                let gap = 8.0;
+                let preview_width = (total_width - right_width - gap - 20.0).max(320.0);
+                let preview_robot = cfg.robot.clone();
 
-                egui::CollapsingHeader::new("Chassi")
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        let c = &mut cfg.robot.chassis;
-                        let mut mass_g = c.mass_kg * 1000.0;
-                        let mut com_x_mm = c.center_of_mass_m.x * 1000.0;
-                        let mut com_y_mm = c.center_of_mass_m.y * 1000.0;
-                        let mut length_mm = c.length_m * 1000.0;
-                        let mut width_mm = c.width_m * 1000.0;
-                        ui.horizontal(|ui| {
-                            ui.label("Massa [g]");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut mass_g)
-                                        .speed(1.0)
-                                        .clamp_range(1.0..=5000.0),
-                                )
-                                .changed()
-                            {
-                                c.mass_kg = mass_g / 1000.0;
-                                invalidate_sim = true;
-                            }
-                            ui.label("Inércia yaw [kg·m²]");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut c.inertia_kg_m2)
-                                        .speed(0.00001)
-                                        .clamp_range(1e-8..=1.0),
-                                )
-                                .changed()
-                            {
-                                invalidate_sim = true;
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("COM x/y [mm]");
-                            if ui
-                                .add(egui::DragValue::new(&mut com_x_mm).speed(0.5))
-                                .changed()
-                            {
-                                c.center_of_mass_m.x = com_x_mm / 1000.0;
-                                invalidate_sim = true;
-                            }
-                            if ui
-                                .add(egui::DragValue::new(&mut com_y_mm).speed(0.5))
-                                .changed()
-                            {
-                                c.center_of_mass_m.y = com_y_mm / 1000.0;
-                                invalidate_sim = true;
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Comprimento/largura [mm]");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut length_mm)
-                                        .speed(0.5)
-                                        .clamp_range(1.0..=1000.0),
-                                )
-                                .changed()
-                            {
-                                c.length_m = length_mm / 1000.0;
-                                invalidate_sim = true;
-                            }
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut width_mm)
-                                        .speed(0.5)
-                                        .clamp_range(1.0..=1000.0),
-                                )
-                                .changed()
-                            {
-                                c.width_m = width_mm / 1000.0;
-                                invalidate_sim = true;
-                            }
-                        });
-                    });
+                ui.allocate_ui_with_layout(
+                    egui::vec2(total_width, total_height),
+                    egui::Layout::left_to_right(egui::Align::Min),
+                    |ui| {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(preview_width, total_height),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui.set_min_size(egui::vec2(preview_width, total_height));
+                                ui.set_max_width(preview_width);
+                                ui.horizontal(|ui| {
+                                    ui.heading("Robot Preview");
+                                    ui.add_space(8.0);
+                                    ui.label("top view, X forward, Y lateral");
+                                });
+                                let preview_height = ui.available_height().max(320.0);
+                                draw_robot_preview(ui, &preview_robot, preview_height);
+                            },
+                        );
 
-                egui::CollapsingHeader::new("Transmissão e rodas")
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        let d = &mut cfg.robot.drivetrain;
-                        let mut radius_mm = d.wheel_radius_m * 1000.0;
-                        let mut width_mm = d.wheel_width_m * 1000.0;
-                        let mut track_width_mm = d.track_width_m * 1000.0;
-                        let mut wheelbase_mm = d.wheelbase_m * 1000.0;
-                        ui.horizontal(|ui| {
-                            ui.label("Raio roda [mm]");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut radius_mm)
-                                        .speed(0.1)
-                                        .clamp_range(1.0..=100.0),
-                                )
-                                .changed()
-                            {
-                                d.wheel_radius_m = radius_mm / 1000.0;
-                                invalidate_sim = true;
-                            }
-                            ui.label("Largura roda [mm]");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut width_mm)
-                                        .speed(0.1)
-                                        .clamp_range(1.0..=100.0),
-                                )
-                                .changed()
-                            {
-                                d.wheel_width_m = width_mm / 1000.0;
-                                invalidate_sim = true;
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Bitola [mm]");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut track_width_mm)
-                                        .speed(0.5)
-                                        .clamp_range(1.0..=500.0),
-                                )
-                                .changed()
-                            {
-                                d.track_width_m = track_width_mm / 1000.0;
-                                invalidate_sim = true;
-                            }
-                            ui.label("Entre-eixos [mm]");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut wheelbase_mm)
-                                        .speed(0.5)
-                                        .clamp_range(1.0..=500.0),
-                                )
-                                .changed()
-                            {
-                                d.wheelbase_m = wheelbase_mm / 1000.0;
-                                invalidate_sim = true;
-                            }
-                        });
-                    });
+                        ui.add_space(gap);
 
-                egui::CollapsingHeader::new("Pneu / atrito")
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label("Modelo");
-                            egui::ComboBox::from_id_source("tire_model")
-                                .selected_text(cfg.robot.tire.model.as_str())
-                                .show_ui(ui, |ui| {
-                                    for model in [
-                                        "IdealWheel",
-                                        "CoulombFrictionWheel",
-                                        "SlipRatioWheel",
-                                        "LoadSensitiveWheel",
-                                    ] {
-                                        ui.selectable_value(
-                                            &mut cfg.robot.tire.model,
-                                            model.to_string(),
-                                            model,
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(right_width, total_height),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui.set_min_size(egui::vec2(right_width, total_height));
+                                ui.set_max_width(right_width);
+                                egui::ScrollArea::vertical()
+                                    .id_source("robot_editor_right_panel_scroll")
+                                    .max_height(total_height)
+                                    .show(ui, |ui| {
+                                        let changed = edit_robot_properties_panel(
+                                            ui,
+                                            &mut cfg.robot,
+                                            &mut robot_file_path_text,
+                                            robot_dirty,
+                                            &mut robot_file_command,
+                                            &mut motor_left_asset_path_text,
+                                            &mut motor_right_asset_path_text,
+                                            &mut driver_asset_path_text,
+                                            &mut battery_asset_path_text,
+                                            &mut tire_asset_path_text,
+                                            &mut line_sensor_asset_path_text,
+                                            &mut fan_asset_path_text,
+                                            &mut selected_fan_asset_index,
+                                            &mut component_asset_command,
+                                            &mut status_to_set,
                                         );
-                                    }
-                                });
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("μ longitudinal");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut cfg.robot.tire.mu_longitudinal)
-                                        .speed(0.01)
-                                        .clamp_range(0.0..=5.0),
-                                )
-                                .changed()
-                            {
-                                invalidate_sim = true;
-                            }
-                            ui.label("μ lateral");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut cfg.robot.tire.mu_lateral)
-                                        .speed(0.01)
-                                        .clamp_range(0.0..=5.0),
-                                )
-                                .changed()
-                            {
-                                invalidate_sim = true;
-                            }
-                            ui.label("Rolamento");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut cfg.robot.tire.rolling_resistance)
-                                        .speed(0.001)
-                                        .clamp_range(0.0..=1.0),
-                                )
-                                .changed()
-                            {
-                                invalidate_sim = true;
-                            }
-                        });
-                    });
-
-                egui::CollapsingHeader::new("Motor, driver e bateria")
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        ui.columns(2, |cols| {
-                            let (left_col, right_col) = cols.split_at_mut(1);
-                            motor_editor(
-                                &mut left_col[0],
-                                "Motor esquerdo",
-                                &mut cfg.robot.motor_left,
-                                &mut invalidate_sim,
-                            );
-                            motor_editor(
-                                &mut right_col[0],
-                                "Motor direito",
-                                &mut cfg.robot.motor_right,
-                                &mut invalidate_sim,
-                            );
-                        });
-                        ui.separator();
-                        ui.horizontal(|ui| {
-                            ui.label("Driver");
-                            ui.text_edit_singleline(&mut cfg.robot.driver.model);
-                            ui.label("PWM [Hz]");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut cfg.robot.driver.pwm_frequency_hz)
-                                        .speed(100.0)
-                                        .clamp_range(10.0..=200_000.0),
-                                )
-                                .changed()
-                            {
-                                invalidate_sim = true;
-                            }
-                            ui.label("Modo");
-                            egui::ComboBox::from_id_source("driver_mode")
-                                .selected_text(cfg.robot.driver.mode.as_str())
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(
-                                        &mut cfg.robot.driver.mode,
-                                        "brake".to_string(),
-                                        "brake",
-                                    );
-                                    ui.selectable_value(
-                                        &mut cfg.robot.driver.mode,
-                                        "coast".to_string(),
-                                        "coast",
-                                    );
-                                });
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Queda driver [V]");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut cfg.robot.driver.voltage_drop_v)
-                                        .speed(0.01)
-                                        .clamp_range(0.0..=5.0),
-                                )
-                                .changed()
-                            {
-                                invalidate_sim = true;
-                            }
-                            ui.label("Limite corrente [A]");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut cfg.robot.driver.current_limit_a)
-                                        .speed(0.1)
-                                        .clamp_range(0.0..=500.0),
-                                )
-                                .changed()
-                            {
-                                invalidate_sim = true;
-                            }
-                        });
-                        ui.separator();
-                        ui.horizontal(|ui| {
-                            ui.label("Bateria");
-                            ui.text_edit_singleline(&mut cfg.robot.battery.model);
-                            ui.label("Células");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut cfg.robot.battery.cells)
-                                        .clamp_range(1.0..=8.0),
-                                )
-                                .changed()
-                            {
-                                invalidate_sim = true;
-                            }
-                            ui.label("V nominal");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut cfg.robot.battery.nominal_voltage_v)
-                                        .speed(0.1),
-                                )
-                                .changed()
-                            {
-                                invalidate_sim = true;
-                            }
-                            ui.label("R interna [Ω]");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(
-                                        &mut cfg.robot.battery.internal_resistance_ohm,
-                                    )
-                                    .speed(0.001)
-                                    .clamp_range(0.0..=10.0),
-                                )
-                                .changed()
-                            {
-                                invalidate_sim = true;
-                            }
-                        });
-                    });
-
-                egui::CollapsingHeader::new("Sensor, encoder, gyro e controle")
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label("Sensores");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut cfg.robot.line_sensor.count)
-                                        .clamp_range(2.0..=64.0),
-                                )
-                                .changed()
-                            {
-                                invalidate_sim = true;
-                            }
-                            let mut sensor_width_mm = cfg.robot.line_sensor.width_m * 1000.0;
-                            let mut forward_mm = cfg.robot.line_sensor.forward_offset_m * 1000.0;
-                            ui.label("Largura array [mm]");
-                            if ui
-                                .add(egui::DragValue::new(&mut sensor_width_mm).speed(0.5))
-                                .changed()
-                            {
-                                cfg.robot.line_sensor.width_m = sensor_width_mm / 1000.0;
-                                invalidate_sim = true;
-                            }
-                            ui.label("Offset frontal [mm]");
-                            if ui
-                                .add(egui::DragValue::new(&mut forward_mm).speed(0.5))
-                                .changed()
-                            {
-                                cfg.robot.line_sensor.forward_offset_m = forward_mm / 1000.0;
-                                invalidate_sim = true;
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("ADC bits");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut cfg.robot.line_sensor.adc_bits)
-                                        .clamp_range(1.0..=24.0),
-                                )
-                                .changed()
-                            {
-                                invalidate_sim = true;
-                            }
-                            ui.label("Ruído reflectância");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(
-                                        &mut cfg.robot.line_sensor.reflectance_noise_std,
-                                    )
-                                    .speed(0.001)
-                                    .clamp_range(0.0..=1.0),
-                                )
-                                .changed()
-                            {
-                                invalidate_sim = true;
-                            }
-                            ui.label("Ticks encoder/rev");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut cfg.robot.encoder.ticks_per_rev)
-                                        .clamp_range(1.0..=100_000.0),
-                                )
-                                .changed()
-                            {
-                                invalidate_sim = true;
-                            }
-                            ui.label("Ruído gyro [rad/s]");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut cfg.robot.gyro.noise_std_rad_s)
-                                        .speed(0.001)
-                                        .clamp_range(0.0..=10.0),
-                                )
-                                .changed()
-                            {
-                                invalidate_sim = true;
-                            }
-                        });
-                        ui.separator();
-                        ui.horizontal(|ui| {
-                            ui.label("PID kp/ki/kd");
-                            if ui
-                                .add(egui::DragValue::new(&mut cfg.robot.controller.kp).speed(0.1))
-                                .changed()
-                            {
-                                invalidate_sim = true;
-                            }
-                            if ui
-                                .add(egui::DragValue::new(&mut cfg.robot.controller.ki).speed(0.01))
-                                .changed()
-                            {
-                                invalidate_sim = true;
-                            }
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut cfg.robot.controller.kd).speed(0.001),
-                                )
-                                .changed()
-                            {
-                                invalidate_sim = true;
-                            }
-                            ui.label("PWM base");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut cfg.robot.controller.base_pwm)
-                                        .speed(0.01)
-                                        .clamp_range(-1.0..=1.0),
-                                )
-                                .changed()
-                            {
-                                invalidate_sim = true;
-                            }
-                            ui.label("PWM máx");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut cfg.robot.controller.max_pwm)
-                                        .speed(0.01)
-                                        .clamp_range(0.0..=1.0),
-                                )
-                                .changed()
-                            {
-                                invalidate_sim = true;
-                            }
-                        });
-                    });
-
-                egui::CollapsingHeader::new("Normal / downforce / sucção")
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label("Modelo");
-                            egui::ComboBox::from_id_source("normal_force_model")
-                                .selected_text(cfg.robot.normal_force.model.as_str())
-                                .show_ui(ui, |ui| {
-                                    for model in [
-                                        "NoDownforce",
-                                        "ConstantDownforce",
-                                        "FanDownforce",
-                                        "SuctionDownforce",
-                                        "MeasuredDownforceCurve",
-                                    ] {
-                                        ui.selectable_value(
-                                            &mut cfg.robot.normal_force.model,
-                                            model.to_string(),
-                                            model,
-                                        );
-                                    }
-                                });
-                            ui.label("PWM padrão");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(
-                                        &mut cfg.robot.normal_force.command_pwm_default,
-                                    )
-                                    .speed(0.01)
-                                    .clamp_range(0.0..=1.0),
-                                )
-                                .changed()
-                            {
-                                cfg.robot.controller.downforce_pwm =
-                                    cfg.robot.normal_force.command_pwm_default;
-                                invalidate_sim = true;
-                            }
-                            ui.label("PWM controle");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut cfg.robot.controller.downforce_pwm)
-                                        .speed(0.01)
-                                        .clamp_range(0.0..=1.0),
-                                )
-                                .changed()
-                            {
-                                invalidate_sim = true;
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Força máx [N]");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut cfg.robot.normal_force.max_force_n)
-                                        .speed(0.01)
-                                        .clamp_range(0.0..=100.0),
-                                )
-                                .changed()
-                            {
-                                invalidate_sim = true;
-                            }
-                            ui.label("Corrente máx [A]");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut cfg.robot.normal_force.max_current_a)
-                                        .speed(0.01)
-                                        .clamp_range(0.0..=100.0),
-                                )
-                                .changed()
-                            {
-                                invalidate_sim = true;
-                            }
-                            ui.label("Resposta [s]");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(
-                                        &mut cfg.robot.normal_force.response_time_s,
-                                    )
-                                    .speed(0.001)
-                                    .clamp_range(0.0..=10.0),
-                                )
-                                .changed()
-                            {
-                                invalidate_sim = true;
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            let mut x_mm = cfg.robot.normal_force.position_m.x * 1000.0;
-                            let mut y_mm = cfg.robot.normal_force.position_m.y * 1000.0;
-                            ui.label("Posição aplicação x/y [mm]");
-                            if ui.add(egui::DragValue::new(&mut x_mm).speed(0.5)).changed() {
-                                cfg.robot.normal_force.position_m.x = x_mm / 1000.0;
-                                invalidate_sim = true;
-                            }
-                            if ui.add(egui::DragValue::new(&mut y_mm).speed(0.5)).changed() {
-                                cfg.robot.normal_force.position_m.y = y_mm / 1000.0;
-                                invalidate_sim = true;
-                            }
-                            ui.label("Área sucção [m²]");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(
-                                        &mut cfg.robot.normal_force.chamber_area_m2,
-                                    )
-                                    .speed(0.0001)
-                                    .clamp_range(0.0..=1.0),
-                                )
-                                .changed()
-                            {
-                                invalidate_sim = true;
-                            }
-                            ui.label("ΔP máx [Pa]");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(
-                                        &mut cfg.robot.normal_force.max_delta_pressure_pa,
-                                    )
-                                    .speed(10.0)
-                                    .clamp_range(0.0..=100_000.0),
-                                )
-                                .changed()
-                            {
-                                invalidate_sim = true;
-                            }
-                        });
-                        ui.separator();
-                        ui.horizontal(|ui| {
-                            ui.strong("Fans");
-                            if ui.button("Adicionar fan").clicked() {
-                                cfg.robot.normal_force.fans.push(FanConfig {
-                                    position_m: Vec2::new(0.03, 0.03),
-                                    max_force_n: 0.5,
-                                    max_current_a: 0.7,
-                                    nominal_voltage_v: cfg.robot.battery.nominal_voltage_v,
-                                    response_time_s: 0.03,
-                                    pwm_scale: 1.0,
-                                    enabled_pwm: 1.0,
-                                    force_curve: vec![(0.0, 0.0), (1.0, 0.5)],
-                                });
-                                cfg.robot.normal_force.model = "FanDownforce".to_string();
-                                invalidate_sim = true;
-                            }
-                        });
-                        let mut remove_fan: Option<usize> = None;
-                        for (idx, fan) in cfg.robot.normal_force.fans.iter_mut().enumerate() {
-                            ui.horizontal(|ui| {
-                                ui.label(format!("Fan {idx}"));
-                                let mut x_mm = fan.position_m.x * 1000.0;
-                                let mut y_mm = fan.position_m.y * 1000.0;
-                                ui.label("x/y [mm]");
-                                if ui.add(egui::DragValue::new(&mut x_mm).speed(0.5)).changed() {
-                                    fan.position_m.x = x_mm / 1000.0;
-                                    invalidate_sim = true;
-                                }
-                                if ui.add(egui::DragValue::new(&mut y_mm).speed(0.5)).changed() {
-                                    fan.position_m.y = y_mm / 1000.0;
-                                    invalidate_sim = true;
-                                }
-                                ui.label("Fmax [N]");
-                                if ui
-                                    .add(egui::DragValue::new(&mut fan.max_force_n).speed(0.01))
-                                    .changed()
-                                {
-                                    invalidate_sim = true;
-                                }
-                                ui.label("Imax [A]");
-                                if ui
-                                    .add(egui::DragValue::new(&mut fan.max_current_a).speed(0.01))
-                                    .changed()
-                                {
-                                    invalidate_sim = true;
-                                }
-                                if ui.button("remover").clicked() {
-                                    remove_fan = Some(idx);
-                                }
-                            });
-                        }
-                        if let Some(idx) = remove_fan {
-                            cfg.robot.normal_force.fans.remove(idx);
-                            invalidate_sim = true;
-                        }
-                    });
-
-                ui.separator();
-                if ui.button("Salvar robô/projeto").clicked() {
-                    save_clicked = true;
-                }
+                                        if changed {
+                                            robot_dirty = true;
+                                            invalidate_sim = true;
+                                        }
+                                    });
+                            },
+                        );
+                    },
+                );
             } else {
                 ui.colored_label(
                     egui::Color32::from_rgb(170, 95, 0),
                     "Carregue um projeto para editar o robô.",
                 );
             }
+
+            self.robot_file_path_text = robot_file_path_text;
+            self.motor_left_asset_path_text = motor_left_asset_path_text;
+            self.motor_right_asset_path_text = motor_right_asset_path_text;
+            self.driver_asset_path_text = driver_asset_path_text;
+            self.battery_asset_path_text = battery_asset_path_text;
+            self.tire_asset_path_text = tire_asset_path_text;
+            self.line_sensor_asset_path_text = line_sensor_asset_path_text;
+            self.fan_asset_path_text = fan_asset_path_text;
+            self.selected_fan_asset_index = selected_fan_asset_index;
+            self.robot_dirty = robot_dirty;
+
             if invalidate_sim {
                 self.sim_session = None;
                 self.last_sim_sample = None;
             }
-            if save_clicked {
-                self.save_current_project();
+            if let Some(status) = status_to_set {
+                self.set_status(status);
+            }
+
+            match robot_file_command {
+                RobotFileCommand::None => {}
+                RobotFileCommand::New => self.create_new_robot(),
+                RobotFileCommand::Load => self.load_robot_asset(),
+                RobotFileCommand::Save => self.save_robot_asset(false),
+                RobotFileCommand::SaveAs => self.save_robot_asset(true),
+            }
+
+            if let Some(command) = component_asset_command {
+                self.handle_component_asset_command(command);
+            }
+        }
+
+        fn create_new_robot(&mut self) {
+            if self.robot_dirty {
+                self.set_status(
+                    "There are unsaved robot changes. Save or discard before creating another robot.",
+                );
+                return;
+            }
+
+            let Some(cfg) = self.cfg.as_mut() else {
+                self.set_status("Nenhum projeto carregado para receber um novo robô.");
+                return;
+            };
+
+            let mut robot = default_robot_config();
+            robot.name = "New Robot".to_string();
+            cfg.robot = robot;
+            cfg.project.robot_path = PathBuf::from("Robots/New Robot.json");
+            self.robot_file_path_text = "Robots/New Robot.json".to_string();
+            self.selected_fan_asset_index = 0;
+            self.robot_dirty = true;
+            self.sim_session = None;
+            self.last_sim_sample = None;
+            self.set_status("New robot created.");
+        }
+
+        fn load_robot_asset(&mut self) {
+            if self.robot_dirty {
+                self.set_status(
+                    "There are unsaved robot changes. Save or discard before loading another robot.",
+                );
+                return;
+            }
+
+            let raw_path = self.robot_file_path_text.trim();
+            if raw_path.is_empty() {
+                self.set_status("Robot file path is empty.");
+                return;
+            }
+            let project_path = self.cfg.as_ref().map(|cfg| cfg.project_path.as_path());
+            let path = resolve_asset_path_text(project_path, raw_path);
+            match load_robot_from_file(&path) {
+                Ok(robot) => {
+                    if let Some(cfg) = self.cfg.as_mut() {
+                        cfg.project.robot_path = path_relative_to_project(&cfg.project_path, &path);
+                        cfg.robot = robot;
+                    } else {
+                        let mut cfg = default_loaded_config(PathBuf::from("projeto_v05.rtsim"));
+                        cfg.project.robot_path = path.clone();
+                        cfg.robot = robot;
+                        self.cfg = Some(cfg);
+                    }
+                    self.robot_file_path_text = Self::path_text(&path);
+                    self.robot_dirty = false;
+                    self.selected_fan_asset_index = 0;
+                    self.sim_session = None;
+                    self.last_sim_sample = None;
+                    self.set_status(format!("Robot loaded from {}", Self::path_text(&path)));
+                }
+                Err(err) => self.set_status(format!("Failed to load robot: {err}")),
+            }
+        }
+
+        fn save_robot_asset(&mut self, save_as: bool) {
+            let raw_path = self.robot_file_path_text.trim();
+            if raw_path.is_empty() {
+                self.set_status("Robot file path is empty.");
+                return;
+            }
+            let project_path = self.cfg.as_ref().map(|cfg| cfg.project_path.as_path());
+            let path = resolve_asset_path_text(project_path, raw_path);
+            let result = self
+                .cfg
+                .as_ref()
+                .ok_or_else(|| "nenhum robô carregado".to_string())
+                .and_then(|cfg| save_robot_to_file(&cfg.robot, &path));
+
+            match result {
+                Ok(()) => {
+                    if let Some(cfg) = self.cfg.as_mut() {
+                        cfg.project.robot_path = path_relative_to_project(&cfg.project_path, &path);
+                    }
+                    self.robot_file_path_text = Self::path_text(&path);
+                    self.robot_dirty = false;
+                    if save_as {
+                        self.set_status(format!("Robot saved as {}", Self::path_text(&path)));
+                    } else {
+                        self.set_status(format!("Robot saved to {}", Self::path_text(&path)));
+                    }
+                }
+                Err(err) => self.set_status(format!("Failed to save robot: {err}")),
+            }
+        }
+
+        fn handle_component_asset_command(&mut self, command: ComponentAssetCommand) {
+            match command.command {
+                ComponentAssetCommandKind::Load => self.load_component_asset(command.kind),
+                ComponentAssetCommandKind::Save => self.save_component_asset(command.kind, false),
+                ComponentAssetCommandKind::SaveAs => self.save_component_asset(command.kind, true),
+            }
+        }
+
+        fn component_asset_path_text_mut(&mut self, kind: ComponentAssetKind) -> &mut String {
+            match kind {
+                ComponentAssetKind::MotorLeft => &mut self.motor_left_asset_path_text,
+                ComponentAssetKind::MotorRight => &mut self.motor_right_asset_path_text,
+                ComponentAssetKind::Driver => &mut self.driver_asset_path_text,
+                ComponentAssetKind::Battery => &mut self.battery_asset_path_text,
+                ComponentAssetKind::Tire => &mut self.tire_asset_path_text,
+                ComponentAssetKind::LineSensor => &mut self.line_sensor_asset_path_text,
+                ComponentAssetKind::Fan => &mut self.fan_asset_path_text,
+            }
+        }
+
+        fn load_component_asset(&mut self, kind: ComponentAssetKind) {
+            let raw_path = self.component_asset_path_text_mut(kind).trim().to_string();
+            if raw_path.is_empty() {
+                self.set_status("Component asset path is empty.");
+                return;
+            }
+            let project_path = self.cfg.as_ref().map(|cfg| cfg.project_path.as_path());
+            let path = resolve_asset_path_text(project_path, &raw_path);
+            let selected_fan_index = self.selected_fan_asset_index;
+            let mut new_selected_fan_index = selected_fan_index;
+            let result: Result<String, String> = (|| {
+                let Some(cfg) = self.cfg.as_mut() else {
+                    return Err("nenhum robô carregado para aplicar componente".to_string());
+                };
+                match kind {
+                    ComponentAssetKind::MotorLeft => {
+                        cfg.robot.motor_left = load_motor_profile_from_file(&path)?.motor;
+                    }
+                    ComponentAssetKind::MotorRight => {
+                        cfg.robot.motor_right = load_motor_profile_from_file(&path)?.motor;
+                    }
+                    ComponentAssetKind::Driver => {
+                        cfg.robot.driver = load_driver_profile_from_file(&path)?.driver;
+                    }
+                    ComponentAssetKind::Battery => {
+                        cfg.robot.battery = load_battery_profile_from_file(&path)?.battery;
+                    }
+                    ComponentAssetKind::Tire => {
+                        cfg.robot.tire = load_tire_profile_from_file(&path)?.tire;
+                    }
+                    ComponentAssetKind::LineSensor => {
+                        cfg.robot.line_sensor = load_line_sensor_profile_from_file(&path)?.line_sensor;
+                    }
+                    ComponentAssetKind::Fan => {
+                        let fan = load_fan_profile_from_file(&path)?.fan;
+                        let idx = selected_fan_index;
+                        if idx < cfg.robot.normal_force.fans.len() {
+                            cfg.robot.normal_force.fans[idx] = fan;
+                        } else {
+                            cfg.robot.normal_force.fans.push(fan);
+                            new_selected_fan_index = cfg.robot.normal_force.fans.len() - 1;
+                        }
+                        cfg.robot.normal_force.model = "FanDownforce".to_string();
+                    }
+                }
+                Ok(format!("Component loaded from {}", Self::path_text(&path)))
+            })();
+
+            match result {
+                Ok(status) => {
+                    *self.component_asset_path_text_mut(kind) = Self::path_text(&path);
+                    self.selected_fan_asset_index = new_selected_fan_index;
+                    self.robot_dirty = true;
+                    self.sim_session = None;
+                    self.last_sim_sample = None;
+                    self.set_status(status);
+                }
+                Err(err) => self.set_status(format!("Failed to load component: {err}")),
+            }
+        }
+
+        fn save_component_asset(&mut self, kind: ComponentAssetKind, save_as: bool) {
+            let raw_path = self.component_asset_path_text_mut(kind).trim().to_string();
+            if raw_path.is_empty() {
+                self.set_status("Component asset path is empty.");
+                return;
+            }
+            let project_path = self.cfg.as_ref().map(|cfg| cfg.project_path.as_path());
+            let path = resolve_asset_path_text(project_path, &raw_path);
+            let selected_fan_index = self.selected_fan_asset_index;
+            let result: Result<(), String> = (|| {
+                let cfg = self
+                    .cfg
+                    .as_ref()
+                    .ok_or_else(|| "nenhum robô carregado".to_string())?;
+                match kind {
+                    ComponentAssetKind::MotorLeft => save_motor_profile_to_file(
+                        &MotorProfile {
+                            schema: "rtsim-motor-profile-v1".to_string(),
+                            name: cfg.robot.motor_left.model.clone(),
+                            motor: cfg.robot.motor_left.clone(),
+                        },
+                        &path,
+                    ),
+                    ComponentAssetKind::MotorRight => save_motor_profile_to_file(
+                        &MotorProfile {
+                            schema: "rtsim-motor-profile-v1".to_string(),
+                            name: cfg.robot.motor_right.model.clone(),
+                            motor: cfg.robot.motor_right.clone(),
+                        },
+                        &path,
+                    ),
+                    ComponentAssetKind::Driver => save_driver_profile_to_file(
+                        &DriverProfile {
+                            schema: "rtsim-driver-profile-v1".to_string(),
+                            name: cfg.robot.driver.model.clone(),
+                            driver: cfg.robot.driver.clone(),
+                        },
+                        &path,
+                    ),
+                    ComponentAssetKind::Battery => save_battery_profile_to_file(
+                        &BatteryProfile {
+                            schema: "rtsim-battery-profile-v1".to_string(),
+                            name: cfg.robot.battery.model.clone(),
+                            battery: cfg.robot.battery.clone(),
+                        },
+                        &path,
+                    ),
+                    ComponentAssetKind::Tire => save_tire_profile_to_file(
+                        &TireProfile {
+                            schema: "rtsim-tire-profile-v1".to_string(),
+                            name: cfg.robot.tire.model.clone(),
+                            tire: cfg.robot.tire.clone(),
+                        },
+                        &path,
+                    ),
+                    ComponentAssetKind::LineSensor => save_line_sensor_profile_to_file(
+                        &LineSensorProfile {
+                            schema: "rtsim-line-sensor-profile-v1".to_string(),
+                            name: cfg.robot.line_sensor.model.clone(),
+                            line_sensor: cfg.robot.line_sensor.clone(),
+                        },
+                        &path,
+                    ),
+                    ComponentAssetKind::Fan => {
+                        let idx = selected_fan_index;
+                        let fan = cfg
+                            .robot
+                            .normal_force
+                            .fans
+                            .get(idx)
+                            .or_else(|| cfg.robot.normal_force.fans.last())
+                            .ok_or_else(|| "nenhum fan disponível para salvar".to_string())?;
+                        save_fan_profile_to_file(
+                            &FanProfile {
+                                schema: "rtsim-fan-profile-v1".to_string(),
+                                name: format!("Fan {}", idx),
+                                fan: fan.clone(),
+                            },
+                            &path,
+                        )
+                    }
+                }
+            })();
+
+            match result {
+                Ok(()) => {
+                    *self.component_asset_path_text_mut(kind) = Self::path_text(&path);
+                    if save_as {
+                        self.set_status(format!("Component saved as {}", Self::path_text(&path)));
+                    } else {
+                        self.set_status(format!("Component saved to {}", Self::path_text(&path)));
+                    }
+                }
+                Err(err) => self.set_status(format!("Failed to save component: {err}")),
             }
         }
 
@@ -3395,6 +3195,829 @@ mod gui {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn edit_robot_properties_panel(
+        ui: &mut egui::Ui,
+        robot: &mut RobotConfig,
+        robot_file_path_text: &mut String,
+        robot_dirty: bool,
+        robot_file_command: &mut RobotFileCommand,
+        motor_left_asset_path_text: &mut String,
+        motor_right_asset_path_text: &mut String,
+        driver_asset_path_text: &mut String,
+        battery_asset_path_text: &mut String,
+        tire_asset_path_text: &mut String,
+        line_sensor_asset_path_text: &mut String,
+        fan_asset_path_text: &mut String,
+        selected_fan_asset_index: &mut usize,
+        component_asset_command: &mut Option<ComponentAssetCommand>,
+        status_to_set: &mut Option<String>,
+    ) -> bool {
+        let mut changed = false;
+        let panel_width = ui.available_width();
+
+        egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::same(8.0))
+            .show(ui, |ui| {
+                ui.set_width(panel_width);
+                ui.horizontal(|ui| {
+                    if robot_dirty {
+                        ui.strong("Robot File *modified");
+                    } else {
+                        ui.strong("Robot File");
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add_sized([70.0, 22.0], egui::Button::new("Save As")).clicked() {
+                            let robots_dir = std::env::current_dir()
+                                .unwrap_or_else(|_| PathBuf::from("."))
+                                .join("Robots");
+                            let _ = fs::create_dir_all(&robots_dir);
+                            if let Some(path) = rfd::FileDialog::new()
+                                .set_title("Save Robot JSON")
+                                .set_file_name(json_file_name_from_name(&robot.name, "robot"))
+                                .add_filter("JSON", &["json"])
+                                .set_directory(&robots_dir)
+                                .save_file()
+                            {
+                                *robot_file_path_text = path.to_string_lossy().replace('\\', "/");
+                                *robot_file_command = RobotFileCommand::SaveAs;
+                            }
+                        }
+                        if ui.add_sized([52.0, 22.0], egui::Button::new("Save")).clicked() {
+                            *robot_file_command = RobotFileCommand::Save;
+                        }
+                        if ui.add_sized([52.0, 22.0], egui::Button::new("Load")).clicked() {
+                            *robot_file_command = RobotFileCommand::Load;
+                        }
+                        if ui.add_sized([48.0, 22.0], egui::Button::new("New")).clicked() {
+                            *robot_file_command = RobotFileCommand::New;
+                        }
+                    });
+                });
+                if robot_dirty {
+                    ui.small(
+                        egui::RichText::new("Unsaved robot changes")
+                            .color(egui::Color32::from_rgb(190, 130, 30)),
+                    );
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.add_sized([42.0, 22.0], egui::Label::new("Path"));
+                    let field_width = (ui.available_width() - 32.0).max(120.0);
+                    ui.add_sized(
+                        [field_width, 22.0],
+                        egui::TextEdit::singleline(robot_file_path_text),
+                    );
+                    if ui.add_sized([26.0, 22.0], egui::Button::new("...")).clicked() {
+                        let robots_dir = std::env::current_dir()
+                            .unwrap_or_else(|_| PathBuf::from("."))
+                            .join("Robots");
+                        let _ = fs::create_dir_all(&robots_dir);
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title("Open Robot JSON")
+                            .set_directory(&robots_dir)
+                            .add_filter("JSON", &["json"])
+                            .pick_file()
+                        {
+                            *robot_file_path_text = path.to_string_lossy().replace('\\', "/");
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add_sized([42.0, 22.0], egui::Label::new("Name"));
+                    if ui
+                        .add_sized(
+                            [ui.available_width(), 22.0],
+                            egui::TextEdit::singleline(&mut robot.name),
+                        )
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                });
+            });
+
+        ui.add_space(8.0);
+        egui::CollapsingHeader::new("Chassis")
+            .default_open(true)
+            .show(ui, |ui| {
+                let c = &mut robot.chassis;
+                let mut mass_g = c.mass_kg * 1000.0;
+                let mut com_x_mm = c.center_of_mass_m.x * 1000.0;
+                let mut com_y_mm = c.center_of_mass_m.y * 1000.0;
+                let mut length_mm = c.length_m * 1000.0;
+                let mut width_mm = c.width_m * 1000.0;
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Mass [g]");
+                    if ui.add(egui::DragValue::new(&mut mass_g).speed(1.0).clamp_range(1.0..=5000.0)).changed() {
+                        c.mass_kg = mass_g / 1000.0;
+                        changed = true;
+                    }
+                    ui.label("Yaw inertia [kg·m²]");
+                    if ui.add(egui::DragValue::new(&mut c.inertia_kg_m2).speed(0.00001).clamp_range(1e-8..=1.0)).changed() {
+                        changed = true;
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("COM x/y [mm]");
+                    if ui.add(egui::DragValue::new(&mut com_x_mm).speed(0.5)).changed() {
+                        c.center_of_mass_m.x = com_x_mm / 1000.0;
+                        changed = true;
+                    }
+                    if ui.add(egui::DragValue::new(&mut com_y_mm).speed(0.5)).changed() {
+                        c.center_of_mass_m.y = com_y_mm / 1000.0;
+                        changed = true;
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Length/width [mm]");
+                    if ui.add(egui::DragValue::new(&mut length_mm).speed(0.5).clamp_range(1.0..=1000.0)).changed() {
+                        c.length_m = length_mm / 1000.0;
+                        changed = true;
+                    }
+                    if ui.add(egui::DragValue::new(&mut width_mm).speed(0.5).clamp_range(1.0..=1000.0)).changed() {
+                        c.width_m = width_mm / 1000.0;
+                        changed = true;
+                    }
+                });
+            });
+
+        egui::CollapsingHeader::new("Drivetrain and Wheels")
+            .default_open(true)
+            .show(ui, |ui| {
+                let d = &mut robot.drivetrain;
+                let mut radius_mm = d.wheel_radius_m * 1000.0;
+                let mut width_mm = d.wheel_width_m * 1000.0;
+                let mut track_width_mm = d.track_width_m * 1000.0;
+                let mut wheelbase_mm = d.wheelbase_m * 1000.0;
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Wheel radius [mm]");
+                    if ui.add(egui::DragValue::new(&mut radius_mm).speed(0.1).clamp_range(1.0..=100.0)).changed() {
+                        d.wheel_radius_m = radius_mm / 1000.0;
+                        changed = true;
+                    }
+                    ui.label("Wheel width [mm]");
+                    if ui.add(egui::DragValue::new(&mut width_mm).speed(0.1).clamp_range(1.0..=100.0)).changed() {
+                        d.wheel_width_m = width_mm / 1000.0;
+                        changed = true;
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Track width [mm]");
+                    if ui.add(egui::DragValue::new(&mut track_width_mm).speed(0.5).clamp_range(1.0..=500.0)).changed() {
+                        d.track_width_m = track_width_mm / 1000.0;
+                        changed = true;
+                    }
+                    ui.label("Wheelbase [mm]");
+                    if ui.add(egui::DragValue::new(&mut wheelbase_mm).speed(0.5).clamp_range(1.0..=500.0)).changed() {
+                        d.wheelbase_m = wheelbase_mm / 1000.0;
+                        changed = true;
+                    }
+                });
+            });
+
+        egui::CollapsingHeader::new("Tire / Friction")
+            .default_open(true)
+            .show(ui, |ui| {
+                component_asset_row(
+                    ui,
+                    "Tire",
+                    tire_asset_path_text,
+                    ComponentAssetKind::Tire,
+                    "RobotAssets/Tires",
+                    json_file_name_from_name(&robot.tire.model, "tire"),
+                    component_asset_command,
+                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Model");
+                    if ui.text_edit_singleline(&mut robot.tire.model).changed() {
+                        changed = true;
+                    }
+                    ui.label("μ longitudinal");
+                    if ui.add(egui::DragValue::new(&mut robot.tire.mu_longitudinal).speed(0.01).clamp_range(0.0..=5.0)).changed() {
+                        changed = true;
+                    }
+                    ui.label("μ lateral");
+                    if ui.add(egui::DragValue::new(&mut robot.tire.mu_lateral).speed(0.01).clamp_range(0.0..=5.0)).changed() {
+                        changed = true;
+                    }
+                    ui.label("Rolling");
+                    if ui.add(egui::DragValue::new(&mut robot.tire.rolling_resistance).speed(0.001).clamp_range(0.0..=1.0)).changed() {
+                        changed = true;
+                    }
+                });
+            });
+
+        egui::CollapsingHeader::new("Motor, Driver and Battery")
+            .default_open(true)
+            .show(ui, |ui| {
+                component_asset_row(
+                    ui,
+                    "Motor Left",
+                    motor_left_asset_path_text,
+                    ComponentAssetKind::MotorLeft,
+                    "RobotAssets/Motors",
+                    json_file_name_from_name(&robot.motor_left.model, "motor_left"),
+                    component_asset_command,
+                );
+                let mut motor_changed = false;
+                motor_editor(ui, "Motor esquerdo", &mut robot.motor_left, &mut motor_changed);
+                changed |= motor_changed;
+                ui.add_space(4.0);
+                component_asset_row(
+                    ui,
+                    "Motor Right",
+                    motor_right_asset_path_text,
+                    ComponentAssetKind::MotorRight,
+                    "RobotAssets/Motors",
+                    json_file_name_from_name(&robot.motor_right.model, "motor_right"),
+                    component_asset_command,
+                );
+                let mut motor_changed = false;
+                motor_editor(ui, "Motor direito", &mut robot.motor_right, &mut motor_changed);
+                changed |= motor_changed;
+                ui.separator();
+                component_asset_row(
+                    ui,
+                    "Driver",
+                    driver_asset_path_text,
+                    ComponentAssetKind::Driver,
+                    "RobotAssets/Drivers",
+                    json_file_name_from_name(&robot.driver.model, "driver"),
+                    component_asset_command,
+                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Driver");
+                    if ui.text_edit_singleline(&mut robot.driver.model).changed() {
+                        changed = true;
+                    }
+                    ui.label("PWM [Hz]");
+                    if ui.add(egui::DragValue::new(&mut robot.driver.pwm_frequency_hz).speed(100.0).clamp_range(10.0..=200_000.0)).changed() {
+                        changed = true;
+                    }
+                    ui.label("Mode");
+                    let old_mode = robot.driver.mode.clone();
+                    egui::ComboBox::from_id_source("robot_driver_mode")
+                        .selected_text(robot.driver.mode.as_str())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut robot.driver.mode, "brake".to_string(), "brake");
+                            ui.selectable_value(&mut robot.driver.mode, "coast".to_string(), "coast");
+                        });
+                    if robot.driver.mode != old_mode {
+                        changed = true;
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Driver drop [V]");
+                    if ui.add(egui::DragValue::new(&mut robot.driver.voltage_drop_v).speed(0.01).clamp_range(0.0..=5.0)).changed() {
+                        changed = true;
+                    }
+                    ui.label("Current limit [A]");
+                    if ui.add(egui::DragValue::new(&mut robot.driver.current_limit_a).speed(0.1).clamp_range(0.0..=500.0)).changed() {
+                        changed = true;
+                    }
+                });
+                ui.separator();
+                component_asset_row(
+                    ui,
+                    "Battery",
+                    battery_asset_path_text,
+                    ComponentAssetKind::Battery,
+                    "RobotAssets/Batteries",
+                    json_file_name_from_name(&robot.battery.model, "battery"),
+                    component_asset_command,
+                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Battery");
+                    if ui.text_edit_singleline(&mut robot.battery.model).changed() {
+                        changed = true;
+                    }
+                    ui.label("Cells");
+                    if ui.add(egui::DragValue::new(&mut robot.battery.cells).clamp_range(1.0..=8.0)).changed() {
+                        changed = true;
+                    }
+                    ui.label("Nominal V");
+                    if ui.add(egui::DragValue::new(&mut robot.battery.nominal_voltage_v).speed(0.1)).changed() {
+                        changed = true;
+                    }
+                    ui.label("R int [Ω]");
+                    if ui.add(egui::DragValue::new(&mut robot.battery.internal_resistance_ohm).speed(0.001).clamp_range(0.0..=10.0)).changed() {
+                        changed = true;
+                    }
+                });
+            });
+
+        egui::CollapsingHeader::new("Sensor, Encoder, Gyro and Control")
+            .default_open(true)
+            .show(ui, |ui| {
+                component_asset_row(
+                    ui,
+                    "Line Sensor",
+                    line_sensor_asset_path_text,
+                    ComponentAssetKind::LineSensor,
+                    "RobotAssets/LineSensors",
+                    json_file_name_from_name(&robot.line_sensor.model, "line_sensor"),
+                    component_asset_command,
+                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Model");
+                    if ui.text_edit_singleline(&mut robot.line_sensor.model).changed() {
+                        changed = true;
+                    }
+                    ui.label("Count");
+                    if ui.add(egui::DragValue::new(&mut robot.line_sensor.count).clamp_range(2.0..=64.0)).changed() {
+                        changed = true;
+                    }
+                    let mut sensor_width_mm = robot.line_sensor.width_m * 1000.0;
+                    let mut forward_mm = robot.line_sensor.forward_offset_m * 1000.0;
+                    ui.label("Width [mm]");
+                    if ui.add(egui::DragValue::new(&mut sensor_width_mm).speed(0.5)).changed() {
+                        robot.line_sensor.width_m = sensor_width_mm / 1000.0;
+                        changed = true;
+                    }
+                    ui.label("Forward [mm]");
+                    if ui.add(egui::DragValue::new(&mut forward_mm).speed(0.5)).changed() {
+                        robot.line_sensor.forward_offset_m = forward_mm / 1000.0;
+                        changed = true;
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("ADC bits");
+                    if ui.add(egui::DragValue::new(&mut robot.line_sensor.adc_bits).clamp_range(1.0..=24.0)).changed() {
+                        changed = true;
+                    }
+                    ui.label("Reflectance noise");
+                    if ui.add(egui::DragValue::new(&mut robot.line_sensor.reflectance_noise_std).speed(0.001).clamp_range(0.0..=1.0)).changed() {
+                        changed = true;
+                    }
+                    ui.label("Encoder ticks/rev");
+                    if ui.add(egui::DragValue::new(&mut robot.encoder.ticks_per_rev).clamp_range(1.0..=100_000.0)).changed() {
+                        changed = true;
+                    }
+                    ui.label("Gyro noise [rad/s]");
+                    if ui.add(egui::DragValue::new(&mut robot.gyro.noise_std_rad_s).speed(0.001).clamp_range(0.0..=10.0)).changed() {
+                        changed = true;
+                    }
+                });
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("PID kp/ki/kd");
+                    if ui.add(egui::DragValue::new(&mut robot.controller.kp).speed(0.1)).changed() {
+                        changed = true;
+                    }
+                    if ui.add(egui::DragValue::new(&mut robot.controller.ki).speed(0.01)).changed() {
+                        changed = true;
+                    }
+                    if ui.add(egui::DragValue::new(&mut robot.controller.kd).speed(0.001)).changed() {
+                        changed = true;
+                    }
+                    ui.label("Base PWM");
+                    if ui.add(egui::DragValue::new(&mut robot.controller.base_pwm).speed(0.01).clamp_range(-1.0..=1.0)).changed() {
+                        changed = true;
+                    }
+                    ui.label("Max PWM");
+                    if ui.add(egui::DragValue::new(&mut robot.controller.max_pwm).speed(0.01).clamp_range(0.0..=1.0)).changed() {
+                        changed = true;
+                    }
+                });
+            });
+
+        egui::CollapsingHeader::new("Normal / Downforce / Suction")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Model");
+                    let old_model = robot.normal_force.model.clone();
+                    egui::ComboBox::from_id_source("robot_normal_force_model")
+                        .selected_text(robot.normal_force.model.as_str())
+                        .show_ui(ui, |ui| {
+                            for model in ["NoDownforce", "ConstantDownforce", "FanDownforce", "SuctionDownforce", "MeasuredDownforceCurve"] {
+                                ui.selectable_value(&mut robot.normal_force.model, model.to_string(), model);
+                            }
+                        });
+                    if robot.normal_force.model != old_model {
+                        changed = true;
+                    }
+                    ui.label("Default PWM");
+                    if ui.add(egui::DragValue::new(&mut robot.normal_force.command_pwm_default).speed(0.01).clamp_range(0.0..=1.0)).changed() {
+                        robot.controller.downforce_pwm = robot.normal_force.command_pwm_default;
+                        changed = true;
+                    }
+                    ui.label("Control PWM");
+                    if ui.add(egui::DragValue::new(&mut robot.controller.downforce_pwm).speed(0.01).clamp_range(0.0..=1.0)).changed() {
+                        changed = true;
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Max force [N]");
+                    if ui.add(egui::DragValue::new(&mut robot.normal_force.max_force_n).speed(0.01).clamp_range(0.0..=100.0)).changed() {
+                        changed = true;
+                    }
+                    ui.label("Max current [A]");
+                    if ui.add(egui::DragValue::new(&mut robot.normal_force.max_current_a).speed(0.01).clamp_range(0.0..=100.0)).changed() {
+                        changed = true;
+                    }
+                    ui.label("Response [s]");
+                    if ui.add(egui::DragValue::new(&mut robot.normal_force.response_time_s).speed(0.001).clamp_range(0.0..=10.0)).changed() {
+                        changed = true;
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    let mut x_mm = robot.normal_force.position_m.x * 1000.0;
+                    let mut y_mm = robot.normal_force.position_m.y * 1000.0;
+                    ui.label("Apply pos x/y [mm]");
+                    if ui.add(egui::DragValue::new(&mut x_mm).speed(0.5)).changed() {
+                        robot.normal_force.position_m.x = x_mm / 1000.0;
+                        changed = true;
+                    }
+                    if ui.add(egui::DragValue::new(&mut y_mm).speed(0.5)).changed() {
+                        robot.normal_force.position_m.y = y_mm / 1000.0;
+                        changed = true;
+                    }
+                    ui.label("Suction area [m²]");
+                    if ui.add(egui::DragValue::new(&mut robot.normal_force.chamber_area_m2).speed(0.0001).clamp_range(0.0..=1.0)).changed() {
+                        changed = true;
+                    }
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.strong("Fans");
+                    if ui.button("Add fan").clicked() {
+                        robot.normal_force.fans.push(FanConfig {
+                            position_m: Vec2::new(0.03, 0.03),
+                            max_force_n: 0.5,
+                            max_current_a: 0.7,
+                            nominal_voltage_v: robot.battery.nominal_voltage_v,
+                            response_time_s: 0.03,
+                            pwm_scale: 1.0,
+                            enabled_pwm: 1.0,
+                            force_curve: vec![(0.0, 0.0), (1.0, 0.5)],
+                        });
+                        *selected_fan_asset_index = robot.normal_force.fans.len() - 1;
+                        robot.normal_force.model = "FanDownforce".to_string();
+                        changed = true;
+                    }
+                    if !robot.normal_force.fans.is_empty() {
+                        let max_idx = robot.normal_force.fans.len() - 1;
+                        *selected_fan_asset_index = (*selected_fan_asset_index).min(max_idx);
+                        ui.label("Selected");
+                        if ui.add(egui::DragValue::new(selected_fan_asset_index).clamp_range(0.0..=max_idx as f64)).changed() {
+                            *selected_fan_asset_index = (*selected_fan_asset_index).min(max_idx);
+                        }
+                    }
+                });
+                component_asset_row(
+                    ui,
+                    "Fan selected",
+                    fan_asset_path_text,
+                    ComponentAssetKind::Fan,
+                    "RobotAssets/Fans",
+                    json_file_name_from_name(
+                        &format!("fan_{}", *selected_fan_asset_index),
+                        "fan",
+                    ),
+                    component_asset_command,
+                );
+                let mut remove_fan: Option<usize> = None;
+                for (idx, fan) in robot.normal_force.fans.iter_mut().enumerate() {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.selectable_value(selected_fan_asset_index, idx, format!("Fan {idx}"));
+                        let mut x_mm = fan.position_m.x * 1000.0;
+                        let mut y_mm = fan.position_m.y * 1000.0;
+                        ui.label("x/y [mm]");
+                        if ui.add(egui::DragValue::new(&mut x_mm).speed(0.5)).changed() {
+                            fan.position_m.x = x_mm / 1000.0;
+                            changed = true;
+                        }
+                        if ui.add(egui::DragValue::new(&mut y_mm).speed(0.5)).changed() {
+                            fan.position_m.y = y_mm / 1000.0;
+                            changed = true;
+                        }
+                        ui.label("Fmax [N]");
+                        if ui.add(egui::DragValue::new(&mut fan.max_force_n).speed(0.01)).changed() {
+                            changed = true;
+                        }
+                        ui.label("Imax [A]");
+                        if ui.add(egui::DragValue::new(&mut fan.max_current_a).speed(0.01)).changed() {
+                            changed = true;
+                        }
+                        if ui.button("remove").clicked() {
+                            remove_fan = Some(idx);
+                        }
+                    });
+                }
+                if let Some(idx) = remove_fan {
+                    robot.normal_force.fans.remove(idx);
+                    if robot.normal_force.fans.is_empty() {
+                        *selected_fan_asset_index = 0;
+                    } else {
+                        *selected_fan_asset_index = (*selected_fan_asset_index).min(robot.normal_force.fans.len() - 1);
+                    }
+                    changed = true;
+                }
+            });
+
+        changed
+    }
+
+    fn component_asset_row(
+        ui: &mut egui::Ui,
+        label: &str,
+        path_text: &mut String,
+        kind: ComponentAssetKind,
+        dir: &str,
+        suggested_file_name: String,
+        command: &mut Option<ComponentAssetCommand>,
+    ) {
+        ui.horizontal_wrapped(|ui| {
+            ui.add_sized([88.0, 22.0], egui::Label::new(label));
+            let field_width = (ui.available_width() - 188.0).max(90.0);
+            ui.add_sized(
+                [field_width, 22.0],
+                egui::TextEdit::singleline(path_text),
+            );
+            if ui.add_sized([26.0, 22.0], egui::Button::new("...")).clicked() {
+                let dir = ensure_asset_dir(dir);
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title(format!("Open {label} JSON"))
+                    .set_directory(&dir)
+                    .add_filter("JSON", &["json"])
+                    .pick_file()
+                {
+                    *path_text = path.to_string_lossy().replace('\\', "/");
+                }
+            }
+            if ui.add_sized([44.0, 22.0], egui::Button::new("Load")).clicked() {
+                *command = Some(ComponentAssetCommand {
+                    kind,
+                    command: ComponentAssetCommandKind::Load,
+                });
+            }
+            if ui.add_sized([44.0, 22.0], egui::Button::new("Save")).clicked() {
+                *command = Some(ComponentAssetCommand {
+                    kind,
+                    command: ComponentAssetCommandKind::Save,
+                });
+            }
+            if ui.add_sized([62.0, 22.0], egui::Button::new("Save As")).clicked() {
+                let dir = ensure_asset_dir(dir);
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title(format!("Save {label} JSON"))
+                    .set_file_name(suggested_file_name)
+                    .add_filter("JSON", &["json"])
+                    .set_directory(&dir)
+                    .save_file()
+                {
+                    *path_text = path.to_string_lossy().replace('\\', "/");
+                    *command = Some(ComponentAssetCommand {
+                        kind,
+                        command: ComponentAssetCommandKind::SaveAs,
+                    });
+                }
+            }
+        });
+    }
+
+    fn ensure_asset_dir(dir: &str) -> PathBuf {
+        let path = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(dir);
+        let _ = fs::create_dir_all(&path);
+        path
+    }
+
+    fn draw_robot_preview(ui: &mut egui::Ui, robot: &RobotConfig, available_height: f32) {
+        let desired = egui::vec2(ui.available_width(), available_height.max(260.0));
+        let (response, painter) = ui.allocate_painter(desired, egui::Sense::hover());
+        let rect = response.rect;
+        painter.rect_filled(rect, egui::Rounding::same(6.0), egui::Color32::from_gray(22));
+        painter.rect_stroke(
+            rect,
+            egui::Rounding::same(6.0),
+            egui::Stroke::new(1.0, egui::Color32::from_gray(70)),
+        );
+
+        let half_l = robot.chassis.length_m.max(0.001) * 0.5;
+        let half_w = robot.chassis.width_m.max(0.001) * 0.5;
+        let mut points = vec![
+            Vec2::new(-half_l, -half_w),
+            Vec2::new(half_l, half_w),
+            robot.chassis.center_of_mass_m,
+            robot.normal_force.position_m,
+            Vec2::new(robot.line_sensor.forward_offset_m, -robot.line_sensor.width_m * 0.5),
+            Vec2::new(robot.line_sensor.forward_offset_m, robot.line_sensor.width_m * 0.5),
+        ];
+        let d = &robot.drivetrain;
+        for x in [-d.wheelbase_m * 0.5, d.wheelbase_m * 0.5] {
+            for y in [-d.track_width_m * 0.5, d.track_width_m * 0.5] {
+                points.push(Vec2::new(x, y));
+            }
+        }
+        for fan in &robot.normal_force.fans {
+            points.push(fan.position_m);
+        }
+        let mut bounds = bounds_from_points(&points);
+        let margin = 0.06;
+        bounds.min_x -= margin;
+        bounds.max_x += margin;
+        bounds.min_y -= margin;
+        bounds.max_y += margin;
+
+        let grid_step_m = 0.05;
+        let mut gx = (bounds.min_x / grid_step_m).floor() as i32;
+        while (gx as f64) * grid_step_m <= bounds.max_x {
+            let x = gx as f64 * grid_step_m;
+            let a = world_to_screen(rect, bounds, Vec2::new(x, bounds.min_y));
+            let b = world_to_screen(rect, bounds, Vec2::new(x, bounds.max_y));
+            painter.line_segment([a, b], egui::Stroke::new(1.0, egui::Color32::from_gray(38)));
+            gx += 1;
+        }
+        let mut gy = (bounds.min_y / grid_step_m).floor() as i32;
+        while (gy as f64) * grid_step_m <= bounds.max_y {
+            let y = gy as f64 * grid_step_m;
+            let a = world_to_screen(rect, bounds, Vec2::new(bounds.min_x, y));
+            let b = world_to_screen(rect, bounds, Vec2::new(bounds.max_x, y));
+            painter.line_segment([a, b], egui::Stroke::new(1.0, egui::Color32::from_gray(38)));
+            gy += 1;
+        }
+
+        let origin = world_to_screen(rect, bounds, Vec2::new(0.0, 0.0));
+        let x_axis = world_to_screen(rect, bounds, Vec2::new(half_l + 0.04, 0.0));
+        let y_axis = world_to_screen(rect, bounds, Vec2::new(0.0, half_w + 0.04));
+        painter.line_segment([origin, x_axis], egui::Stroke::new(2.0, egui::Color32::from_rgb(210, 120, 60)));
+        painter.line_segment([origin, y_axis], egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 160, 220)));
+        painter.text(x_axis, egui::Align2::LEFT_CENTER, "+X front", egui::FontId::proportional(11.0), egui::Color32::from_rgb(230, 160, 100));
+        painter.text(y_axis, egui::Align2::CENTER_BOTTOM, "+Y left", egui::FontId::proportional(11.0), egui::Color32::from_rgb(120, 190, 240));
+
+        let chassis = [
+            Vec2::new(half_l, half_w),
+            Vec2::new(half_l, -half_w),
+            Vec2::new(-half_l, -half_w),
+            Vec2::new(-half_l, half_w),
+        ];
+        let chassis_points: Vec<egui::Pos2> = chassis
+            .iter()
+            .map(|p| world_to_screen(rect, bounds, *p))
+            .collect();
+        painter.add(egui::Shape::convex_polygon(
+            chassis_points.clone(),
+            egui::Color32::from_rgb(48, 55, 64),
+            egui::Stroke::new(2.0, egui::Color32::from_rgb(170, 190, 210)),
+        ));
+        painter.add(egui::Shape::closed_line(
+            chassis_points,
+            egui::Stroke::new(2.0, egui::Color32::from_rgb(210, 220, 235)),
+        ));
+
+        if robot.normal_force.chamber_area_m2 > 0.0 {
+            let side = robot.normal_force.chamber_area_m2.sqrt().clamp(0.005, robot.chassis.width_m.max(0.005));
+            draw_preview_rect(
+                &painter,
+                rect,
+                bounds,
+                robot.normal_force.position_m,
+                side,
+                side,
+                egui::Color32::from_rgba_premultiplied(80, 120, 210, 70),
+                egui::Color32::from_rgb(90, 150, 240),
+            );
+        }
+
+        let wheel_len = (robot.drivetrain.wheel_radius_m * 2.0).max(0.005);
+        let wheel_w = robot.drivetrain.wheel_width_m.max(0.003);
+        for (x, label_x) in [(-robot.drivetrain.wheelbase_m * 0.5, "R"), (robot.drivetrain.wheelbase_m * 0.5, "F")] {
+            for (y, label_y) in [(-robot.drivetrain.track_width_m * 0.5, "Right"), (robot.drivetrain.track_width_m * 0.5, "Left")] {
+                draw_preview_rect(
+                    &painter,
+                    rect,
+                    bounds,
+                    Vec2::new(x, y),
+                    wheel_len,
+                    wheel_w,
+                    egui::Color32::from_rgb(30, 30, 34),
+                    egui::Color32::from_rgb(230, 230, 230),
+                );
+                let p = world_to_screen(rect, bounds, Vec2::new(x, y));
+                painter.text(
+                    p + egui::vec2(4.0, -4.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    format!("{label_y} {label_x}"),
+                    egui::FontId::proportional(9.0),
+                    egui::Color32::from_gray(220),
+                );
+            }
+        }
+
+        let sensor = &robot.line_sensor;
+        let count = sensor.count.max(1);
+        let sensor_y0 = -sensor.width_m * 0.5;
+        let pitch = if count > 1 {
+            sensor.width_m / (count - 1) as f64
+        } else {
+            0.0
+        };
+        let bar_a = world_to_screen(rect, bounds, Vec2::new(sensor.forward_offset_m, sensor_y0));
+        let bar_b = world_to_screen(rect, bounds, Vec2::new(sensor.forward_offset_m, -sensor_y0));
+        painter.line_segment([bar_a, bar_b], egui::Stroke::new(3.0, egui::Color32::from_rgb(90, 220, 120)));
+        for i in 0..count {
+            let y = sensor_y0 + pitch * i as f64;
+            let p = world_to_screen(rect, bounds, Vec2::new(sensor.forward_offset_m, y));
+            painter.circle_filled(p, 4.0, egui::Color32::from_rgb(110, 255, 150));
+        }
+        painter.text(
+            bar_a + egui::vec2(6.0, -6.0),
+            egui::Align2::LEFT_BOTTOM,
+            format!("Line sensor ({count})"),
+            egui::FontId::proportional(11.0),
+            egui::Color32::from_rgb(120, 255, 160),
+        );
+
+        let com = world_to_screen(rect, bounds, robot.chassis.center_of_mass_m);
+        painter.circle_stroke(com, 7.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 220, 70)));
+        painter.line_segment([com + egui::vec2(-7.0, 0.0), com + egui::vec2(7.0, 0.0)], egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 220, 70)));
+        painter.line_segment([com + egui::vec2(0.0, -7.0), com + egui::vec2(0.0, 7.0)], egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 220, 70)));
+        painter.text(com + egui::vec2(8.0, 8.0), egui::Align2::LEFT_TOP, "COM", egui::FontId::proportional(11.0), egui::Color32::from_rgb(255, 220, 70));
+
+        let nf = world_to_screen(rect, bounds, robot.normal_force.position_m);
+        let diamond = vec![
+            nf + egui::vec2(0.0, -7.0),
+            nf + egui::vec2(7.0, 0.0),
+            nf + egui::vec2(0.0, 7.0),
+            nf + egui::vec2(-7.0, 0.0),
+        ];
+        painter.add(egui::Shape::convex_polygon(
+            diamond,
+            egui::Color32::from_rgb(130, 100, 240),
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(210, 200, 255)),
+        ));
+        painter.text(nf + egui::vec2(8.0, -8.0), egui::Align2::LEFT_BOTTOM, "Normal/downforce", egui::FontId::proportional(10.0), egui::Color32::from_rgb(210, 200, 255));
+
+        for (idx, fan) in robot.normal_force.fans.iter().enumerate() {
+            let inside = fan.position_m.x.abs() <= half_l && fan.position_m.y.abs() <= half_w;
+            let color = if inside {
+                egui::Color32::from_rgb(120, 200, 255)
+            } else {
+                egui::Color32::from_rgb(255, 90, 90)
+            };
+            let p = world_to_screen(rect, bounds, fan.position_m);
+            let r = world_len_to_screen(rect, bounds, 0.012).clamp(6.0, 18.0);
+            painter.circle_stroke(p, r, egui::Stroke::new(2.0, color));
+            painter.line_segment([p + egui::vec2(-r, 0.0), p + egui::vec2(r, 0.0)], egui::Stroke::new(1.0, color));
+            painter.line_segment([p + egui::vec2(0.0, -r), p + egui::vec2(0.0, r)], egui::Stroke::new(1.0, color));
+            painter.text(
+                p + egui::vec2(r + 3.0, 0.0),
+                egui::Align2::LEFT_CENTER,
+                format!("Fan {idx}"),
+                egui::FontId::proportional(10.0),
+                color,
+            );
+        }
+
+        let scale_len_m = 0.10;
+        let scale_start = Vec2::new(bounds.min_x + 0.03, bounds.min_y + 0.03);
+        let scale_end = Vec2::new(scale_start.x + scale_len_m, scale_start.y);
+        let a = world_to_screen(rect, bounds, scale_start);
+        let b = world_to_screen(rect, bounds, scale_end);
+        painter.line_segment([a, b], egui::Stroke::new(3.0, egui::Color32::from_gray(230)));
+        painter.text(
+            b + egui::vec2(5.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            "100 mm",
+            egui::FontId::proportional(11.0),
+            egui::Color32::from_gray(230),
+        );
+    }
+
+    fn draw_preview_rect(
+        painter: &egui::Painter,
+        rect: egui::Rect,
+        bounds: Bounds,
+        center: Vec2,
+        length_m: f64,
+        width_m: f64,
+        fill: egui::Color32,
+        stroke: egui::Color32,
+    ) {
+        let half_l = length_m * 0.5;
+        let half_w = width_m * 0.5;
+        let corners = [
+            Vec2::new(center.x + half_l, center.y + half_w),
+            Vec2::new(center.x + half_l, center.y - half_w),
+            Vec2::new(center.x - half_l, center.y - half_w),
+            Vec2::new(center.x - half_l, center.y + half_w),
+        ];
+        let points: Vec<egui::Pos2> = corners
+            .iter()
+            .map(|p| world_to_screen(rect, bounds, *p))
+            .collect();
+        painter.add(egui::Shape::convex_polygon(
+            points,
+            fill,
+            egui::Stroke::new(1.0, stroke),
+        ));
+    }
+
     fn nav_button(ui: &mut egui::Ui, current: &mut AppView, target: AppView, label: &str) {
         if ui.selectable_label(*current == target, label).clicked() {
             *current = target;
@@ -3411,7 +4034,9 @@ mod gui {
             ui.strong(title);
             ui.horizontal(|ui| {
                 ui.label("Modelo");
-                ui.text_edit_singleline(&mut motor.model);
+                if ui.text_edit_singleline(&mut motor.model).changed() {
+                    *invalidate = true;
+                }
             });
             ui.horizontal(|ui| {
                 ui.label("Redução");
@@ -4240,6 +4865,58 @@ mod gui {
         fs::write(path, surface_profile_json(profile)).map_err(|e| e.to_string())
     }
 
+    fn save_robot_to_file(robot: &RobotConfig, path: &Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::write(path, robot_json(robot)).map_err(|e| e.to_string())
+    }
+
+    fn save_motor_profile_to_file(profile: &MotorProfile, path: &Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::write(path, motor_profile_json(profile)).map_err(|e| e.to_string())
+    }
+
+    fn save_driver_profile_to_file(profile: &DriverProfile, path: &Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::write(path, driver_profile_json(profile)).map_err(|e| e.to_string())
+    }
+
+    fn save_battery_profile_to_file(profile: &BatteryProfile, path: &Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::write(path, battery_profile_json(profile)).map_err(|e| e.to_string())
+    }
+
+    fn save_tire_profile_to_file(profile: &TireProfile, path: &Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::write(path, tire_profile_json(profile)).map_err(|e| e.to_string())
+    }
+
+    fn save_line_sensor_profile_to_file(
+        profile: &LineSensorProfile,
+        path: &Path,
+    ) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::write(path, line_sensor_profile_json(profile)).map_err(|e| e.to_string())
+    }
+
+    fn save_fan_profile_to_file(profile: &FanProfile, path: &Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::write(path, fan_profile_json(profile)).map_err(|e| e.to_string())
+    }
+
     fn save_loaded_config(cfg: &LoadedConfig) -> Result<(), String> {
         if let Some(track) = &cfg.track.parametric {
             if track.rules.mode == TrackRulesMode::Strict {
@@ -4355,6 +5032,60 @@ mod gui {
         ));
         out.push_str("  }\n}\n");
         out
+    }
+
+    fn motor_profile_json(profile: &MotorProfile) -> String {
+        format!(
+            "{{\n  \"motor_profile_schema\": \"{}\",\n  \"name\": \"{}\",\n  \"motor\": {}\n}}\n",
+            escape_json(&profile.schema),
+            escape_json(&profile.name),
+            motor_json(&profile.motor, 2)
+        )
+    }
+
+    fn driver_profile_json(profile: &DriverProfile) -> String {
+        format!(
+            "{{\n  \"driver_profile_schema\": \"{}\",\n  \"name\": \"{}\",\n  \"driver\": {}\n}}\n",
+            escape_json(&profile.schema),
+            escape_json(&profile.name),
+            driver_json(&profile.driver, 2)
+        )
+    }
+
+    fn battery_profile_json(profile: &BatteryProfile) -> String {
+        format!(
+            "{{\n  \"battery_profile_schema\": \"{}\",\n  \"name\": \"{}\",\n  \"battery\": {}\n}}\n",
+            escape_json(&profile.schema),
+            escape_json(&profile.name),
+            battery_json(&profile.battery, 2)
+        )
+    }
+
+    fn tire_profile_json(profile: &TireProfile) -> String {
+        format!(
+            "{{\n  \"tire_profile_schema\": \"{}\",\n  \"name\": \"{}\",\n  \"tire\": {}\n}}\n",
+            escape_json(&profile.schema),
+            escape_json(&profile.name),
+            tire_json(&profile.tire, 2)
+        )
+    }
+
+    fn line_sensor_profile_json(profile: &LineSensorProfile) -> String {
+        format!(
+            "{{\n  \"line_sensor_profile_schema\": \"{}\",\n  \"name\": \"{}\",\n  \"line_sensor\": {}\n}}\n",
+            escape_json(&profile.schema),
+            escape_json(&profile.name),
+            line_sensor_json(&profile.line_sensor, 2)
+        )
+    }
+
+    fn fan_profile_json(profile: &FanProfile) -> String {
+        format!(
+            "{{\n  \"fan_profile_schema\": \"{}\",\n  \"name\": \"{}\",\n  \"fan\": {}\n}}\n",
+            escape_json(&profile.schema),
+            escape_json(&profile.name),
+            fan_json(&profile.fan, 2)
+        )
     }
 
     fn robot_json(robot: &RobotConfig) -> String {
@@ -4482,6 +5213,81 @@ mod gui {
             motor.no_load_rpm,
             motor.stall_torque_nm * 1000.0,
             motor.stall_current_a,
+        )
+    }
+
+    fn driver_json(driver: &DriverConfig, indent: usize) -> String {
+        let pad = " ".repeat(indent);
+        format!(
+            "{{\n{pad}  \"model\": \"{}\",\n{pad}  \"pwm_frequency_hz\": {:.6},\n{pad}  \"mode\": \"{}\",\n{pad}  \"voltage_drop_v\": {:.9},\n{pad}  \"pwm_resolution_bits\": {},\n{pad}  \"command_deadband\": {:.9},\n{pad}  \"current_limit_a\": {:.9}\n{pad}}}",
+            escape_json(&driver.model),
+            driver.pwm_frequency_hz,
+            escape_json(&driver.mode),
+            driver.voltage_drop_v,
+            driver.pwm_resolution_bits,
+            driver.command_deadband,
+            driver.current_limit_a
+        )
+    }
+
+    fn battery_json(battery: &BatteryConfig, indent: usize) -> String {
+        let pad = " ".repeat(indent);
+        format!(
+            "{{\n{pad}  \"model\": \"{}\",\n{pad}  \"nominal_voltage_v\": {:.9},\n{pad}  \"full_voltage_v\": {:.9},\n{pad}  \"empty_voltage_v\": {:.9},\n{pad}  \"cells\": {},\n{pad}  \"capacity_mah\": {:.9},\n{pad}  \"internal_resistance_ohm\": {:.9},\n{pad}  \"initial_soc\": {:.9},\n{pad}  \"current_limit_a\": {:.9}\n{pad}}}",
+            escape_json(&battery.model),
+            battery.nominal_voltage_v,
+            battery.full_voltage_v,
+            battery.empty_voltage_v,
+            battery.cells,
+            battery.capacity_mah,
+            battery.internal_resistance_ohm,
+            battery.initial_soc,
+            battery.current_limit_a
+        )
+    }
+
+    fn tire_json(tire: &TireConfig, indent: usize) -> String {
+        let pad = " ".repeat(indent);
+        format!(
+            "{{\n{pad}  \"model\": \"{}\",\n{pad}  \"mu_longitudinal\": {:.9},\n{pad}  \"mu_lateral\": {:.9},\n{pad}  \"rolling_resistance\": {:.9},\n{pad}  \"slip_velocity_epsilon_m_s\": {:.9}\n{pad}}}",
+            escape_json(&tire.model),
+            tire.mu_longitudinal,
+            tire.mu_lateral,
+            tire.rolling_resistance,
+            tire.slip_velocity_epsilon_m_s
+        )
+    }
+
+    fn line_sensor_json(sensor: &LineSensorConfig, indent: usize) -> String {
+        let pad = " ".repeat(indent);
+        format!(
+            "{{\n{pad}  \"model\": \"{}\",\n{pad}  \"count\": {},\n{pad}  \"width_mm\": {:.6},\n{pad}  \"forward_offset_mm\": {:.6},\n{pad}  \"adc_bits\": {},\n{pad}  \"gain\": {:.9},\n{pad}  \"offset\": {:.9},\n{pad}  \"reflectance_noise_std\": {:.9},\n{pad}  \"adc_noise_lsb\": {:.9},\n{pad}  \"seed\": {}\n{pad}}}",
+            escape_json(&sensor.model),
+            sensor.count,
+            sensor.width_m * 1000.0,
+            sensor.forward_offset_m * 1000.0,
+            sensor.adc_bits,
+            sensor.gain,
+            sensor.offset,
+            sensor.reflectance_noise_std,
+            sensor.adc_noise_lsb,
+            sensor.seed
+        )
+    }
+
+    fn fan_json(fan: &FanConfig, indent: usize) -> String {
+        let pad = " ".repeat(indent);
+        format!(
+            "{{\n{pad}  \"position_mm\": [{:.6}, {:.6}],\n{pad}  \"max_force_n\": {:.9},\n{pad}  \"max_current_a\": {:.9},\n{pad}  \"nominal_voltage_v\": {:.9},\n{pad}  \"response_time_s\": {:.9},\n{pad}  \"pwm_scale\": {:.9},\n{pad}  \"pwm\": {:.9},\n{pad}  \"force_curve\": {}\n{pad}}}",
+            fan.position_m.x * 1000.0,
+            fan.position_m.y * 1000.0,
+            fan.max_force_n,
+            fan.max_current_a,
+            fan.nominal_voltage_v,
+            fan.response_time_s,
+            fan.pwm_scale,
+            fan.enabled_pwm,
+            curve_json(&fan.force_curve)
         )
     }
 
@@ -5031,6 +5837,10 @@ mod gui {
             robot,
             track,
         }
+    }
+
+    fn default_robot_config() -> RobotConfig {
+        default_loaded_config(PathBuf::from("robot_default_tmp.rtsim")).robot
     }
 
     fn default_motor() -> MotorConfig {

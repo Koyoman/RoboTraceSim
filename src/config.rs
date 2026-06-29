@@ -290,6 +290,48 @@ pub struct SurfaceProfile {
     pub overrides: TrackRuleOverrides,
 }
 
+#[derive(Debug, Clone)]
+pub struct MotorProfile {
+    pub schema: String,
+    pub name: String,
+    pub motor: MotorConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct DriverProfile {
+    pub schema: String,
+    pub name: String,
+    pub driver: DriverConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct BatteryProfile {
+    pub schema: String,
+    pub name: String,
+    pub battery: BatteryConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct TireProfile {
+    pub schema: String,
+    pub name: String,
+    pub tire: TireConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct LineSensorProfile {
+    pub schema: String,
+    pub name: String,
+    pub line_sensor: LineSensorConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct FanProfile {
+    pub schema: String,
+    pub name: String,
+    pub fan: FanConfig,
+}
+
 impl TrackConfig {
     pub fn from_parametric(mut track: TrackV2) -> Self {
         track.schema = "rtsim-track-v2".to_string();
@@ -366,6 +408,50 @@ pub fn load_surface_profile_from_file(path: impl AsRef<Path>) -> Result<SurfaceP
     let path = path.as_ref();
     let profile_json = read_json(path).map_err(|err| err.to_string())?;
     parse_surface_profile_config(path, &profile_json).map_err(|err| err.to_string())
+}
+
+pub fn load_robot_from_file(path: impl AsRef<Path>) -> Result<RobotConfig, String> {
+    let path = path.as_ref();
+    let robot_json = read_json(path).map_err(|err| err.to_string())?;
+    parse_robot_config(path, &robot_json).map_err(|err| err.to_string())
+}
+
+pub fn load_motor_profile_from_file(path: impl AsRef<Path>) -> Result<MotorProfile, String> {
+    let path = path.as_ref();
+    let profile_json = read_json(path).map_err(|err| err.to_string())?;
+    parse_motor_profile_config(path, &profile_json).map_err(|err| err.to_string())
+}
+
+pub fn load_driver_profile_from_file(path: impl AsRef<Path>) -> Result<DriverProfile, String> {
+    let path = path.as_ref();
+    let profile_json = read_json(path).map_err(|err| err.to_string())?;
+    parse_driver_profile_config(path, &profile_json).map_err(|err| err.to_string())
+}
+
+pub fn load_battery_profile_from_file(path: impl AsRef<Path>) -> Result<BatteryProfile, String> {
+    let path = path.as_ref();
+    let profile_json = read_json(path).map_err(|err| err.to_string())?;
+    parse_battery_profile_config(path, &profile_json).map_err(|err| err.to_string())
+}
+
+pub fn load_tire_profile_from_file(path: impl AsRef<Path>) -> Result<TireProfile, String> {
+    let path = path.as_ref();
+    let profile_json = read_json(path).map_err(|err| err.to_string())?;
+    parse_tire_profile_config(path, &profile_json).map_err(|err| err.to_string())
+}
+
+pub fn load_line_sensor_profile_from_file(
+    path: impl AsRef<Path>,
+) -> Result<LineSensorProfile, String> {
+    let path = path.as_ref();
+    let profile_json = read_json(path).map_err(|err| err.to_string())?;
+    parse_line_sensor_profile_config(path, &profile_json).map_err(|err| err.to_string())
+}
+
+pub fn load_fan_profile_from_file(path: impl AsRef<Path>) -> Result<FanProfile, String> {
+    let path = path.as_ref();
+    let profile_json = read_json(path).map_err(|err| err.to_string())?;
+    parse_fan_profile_config(path, &profile_json).map_err(|err| err.to_string())
 }
 
 pub fn apply_surface_profile(track: &mut TrackV2, profile: &SurfaceProfile) {
@@ -708,26 +794,34 @@ fn parse_fans(path: &Path, value: &JsonValue) -> CfgResult<Vec<FanConfig>> {
     })?;
     let mut fans = Vec::with_capacity(arr.len());
     for (i, fan) in arr.iter().enumerate() {
-        let position_m = vec2_mm_field(fan, "position_mm", Vec2::new(0.0, 0.0));
-        let force_curve = fan
-            .get("force_curve")
-            .or_else(|| fan.get("thrust_curve"))
-            .or_else(|| fan.get("measured_curve"))
-            .map(|v| parse_curve(path, v, &format!("normal_force.fans[{i}].force_curve")))
-            .transpose()?
-            .unwrap_or_default();
-        fans.push(FanConfig {
-            position_m,
-            max_force_n: num_field(fan, "max_force_n", 0.0),
-            max_current_a: num_field(fan, "max_current_a", 0.0),
-            nominal_voltage_v: num_field(fan, "nominal_voltage_v", 7.4),
-            response_time_s: num_field(fan, "response_time_s", 0.0),
-            pwm_scale: num_field(fan, "pwm_scale", 1.0),
-            enabled_pwm: num_field(fan, "pwm", 1.0),
-            force_curve,
-        });
+        fans.push(parse_fan_config(
+            path,
+            fan,
+            &format!("normal_force.fans[{i}]"),
+        )?);
     }
     Ok(fans)
+}
+
+fn parse_fan_config(path: &Path, fan: &JsonValue, field: &str) -> CfgResult<FanConfig> {
+    let position_m = vec2_mm_field(fan, "position_mm", Vec2::new(0.0, 0.0));
+    let force_curve = fan
+        .get("force_curve")
+        .or_else(|| fan.get("thrust_curve"))
+        .or_else(|| fan.get("measured_curve"))
+        .map(|v| parse_curve(path, v, &format!("{field}.force_curve")))
+        .transpose()?
+        .unwrap_or_default();
+    Ok(FanConfig {
+        position_m,
+        max_force_n: num_field(fan, "max_force_n", 0.0),
+        max_current_a: num_field(fan, "max_current_a", 0.0),
+        nominal_voltage_v: num_field(fan, "nominal_voltage_v", 7.4),
+        response_time_s: num_field(fan, "response_time_s", 0.0),
+        pwm_scale: num_field(fan, "pwm_scale", 1.0),
+        enabled_pwm: num_field(fan, "pwm", 1.0),
+        force_curve,
+    })
 }
 
 fn parse_curve(path: &Path, value: &JsonValue, field: &str) -> CfgResult<Vec<(f64, f64)>> {
@@ -987,6 +1081,149 @@ fn parse_surface_profile_config(path: &Path, root: &JsonValue) -> CfgResult<Surf
             .unwrap_or(&name)
             .to_string(),
         overrides,
+    })
+}
+
+
+fn profile_schema(root: &JsonValue, field: &str, default: &str) -> String {
+    root.get(field)
+        .or_else(|| root.get("profile_schema"))
+        .and_then(JsonValue::as_str)
+        .unwrap_or(default)
+        .to_string()
+}
+
+fn profile_name(root: &JsonValue, item: &JsonValue, fallback: &str) -> String {
+    root.get("name")
+        .or_else(|| item.get("name"))
+        .or_else(|| item.get("model"))
+        .and_then(JsonValue::as_str)
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+fn parse_motor_profile_config(_path: &Path, root: &JsonValue) -> CfgResult<MotorProfile> {
+    let motor_json = root.get("motor").unwrap_or(root);
+    let motor = parse_motor(motor_json);
+    Ok(MotorProfile {
+        schema: profile_schema(root, "motor_profile_schema", "rtsim-motor-profile-v1"),
+        name: profile_name(root, motor_json, &motor.model),
+        motor,
+    })
+}
+
+fn parse_driver_profile_config(path: &Path, root: &JsonValue) -> CfgResult<DriverProfile> {
+    let driver_json = root.get("driver").unwrap_or(root);
+    let driver = parse_driver_config(path, Some(driver_json))?;
+    Ok(DriverProfile {
+        schema: profile_schema(root, "driver_profile_schema", "rtsim-driver-profile-v1"),
+        name: profile_name(root, driver_json, &driver.model),
+        driver,
+    })
+}
+
+fn parse_battery_profile_config(path: &Path, root: &JsonValue) -> CfgResult<BatteryProfile> {
+    let battery_json = root.get("battery").unwrap_or(root);
+    let battery = parse_battery_config(path, Some(battery_json))?;
+    Ok(BatteryProfile {
+        schema: profile_schema(root, "battery_profile_schema", "rtsim-battery-profile-v1"),
+        name: profile_name(root, battery_json, &battery.model),
+        battery,
+    })
+}
+
+fn parse_tire_profile_config(path: &Path, root: &JsonValue) -> CfgResult<TireProfile> {
+    let tire_json = root.get("tire").unwrap_or(root);
+    let tire = parse_tire_config(path, tire_json)?;
+    Ok(TireProfile {
+        schema: profile_schema(root, "tire_profile_schema", "rtsim-tire-profile-v1"),
+        name: profile_name(root, tire_json, &tire.model),
+        tire,
+    })
+}
+
+fn parse_line_sensor_profile_config(path: &Path, root: &JsonValue) -> CfgResult<LineSensorProfile> {
+    let sensor_json = root
+        .get("line_sensor")
+        .or_else(|| root.get("sensor"))
+        .unwrap_or(root);
+    let line_sensor = parse_line_sensor_config(path, sensor_json)?;
+    Ok(LineSensorProfile {
+        schema: profile_schema(
+            root,
+            "line_sensor_profile_schema",
+            "rtsim-line-sensor-profile-v1",
+        ),
+        name: profile_name(root, sensor_json, &line_sensor.model),
+        line_sensor,
+    })
+}
+
+fn parse_fan_profile_config(path: &Path, root: &JsonValue) -> CfgResult<FanProfile> {
+    let fan_json = root.get("fan").unwrap_or(root);
+    let fan = parse_fan_config(path, fan_json, "fan")?;
+    Ok(FanProfile {
+        schema: profile_schema(root, "fan_profile_schema", "rtsim-fan-profile-v1"),
+        name: profile_name(root, fan_json, "fan"),
+        fan,
+    })
+}
+
+fn parse_tire_config(path: &Path, tire_json: &JsonValue) -> CfgResult<TireConfig> {
+    Ok(TireConfig {
+        model: str_field(path, tire_json, "model", "SlipRatioWheel")?.to_string(),
+        mu_longitudinal: num_field(tire_json, "mu_longitudinal", 1.2),
+        mu_lateral: num_field(tire_json, "mu_lateral", 1.0),
+        rolling_resistance: num_field(tire_json, "rolling_resistance", 0.015),
+        slip_velocity_epsilon_m_s: num_field(tire_json, "slip_velocity_epsilon_m_s", 0.05),
+    })
+}
+
+fn parse_driver_config(path: &Path, driver_json: Option<&JsonValue>) -> CfgResult<DriverConfig> {
+    Ok(DriverConfig {
+        model: nested_str(driver_json, "model", "PwmHBridge").to_string(),
+        pwm_frequency_hz: nested_num(path, driver_json, "pwm_frequency_hz", 20_000.0)?,
+        mode: nested_str(driver_json, "mode", "brake").to_string(),
+        voltage_drop_v: nested_num(path, driver_json, "voltage_drop_v", 0.2)?,
+        pwm_resolution_bits: nested_num(path, driver_json, "pwm_resolution_bits", 10.0)? as u32,
+        command_deadband: nested_num(path, driver_json, "command_deadband", 0.001)?,
+        current_limit_a: nested_num(path, driver_json, "current_limit_a", 1000.0)?,
+    })
+}
+
+fn parse_battery_config(path: &Path, battery_json: Option<&JsonValue>) -> CfgResult<BatteryConfig> {
+    let cells = nested_num(path, battery_json, "cells", 2.0)? as u32;
+    let nominal_voltage_v = nested_num(path, battery_json, "nominal_voltage_v", 7.4)?;
+    Ok(BatteryConfig {
+        model: nested_str(battery_json, "model", "VoltageSagBattery").to_string(),
+        cells,
+        nominal_voltage_v,
+        full_voltage_v: nested_num(path, battery_json, "full_voltage_v", nominal_voltage_v)?,
+        empty_voltage_v: nested_num(
+            path,
+            battery_json,
+            "empty_voltage_v",
+            3.2 * cells.max(1) as f64,
+        )?,
+        capacity_mah: nested_num(path, battery_json, "capacity_mah", 300.0)?,
+        internal_resistance_ohm: nested_num(path, battery_json, "internal_resistance_ohm", 0.08)?,
+        initial_soc: nested_num(path, battery_json, "initial_soc", 1.0)?,
+        current_limit_a: nested_num(path, battery_json, "current_limit_a", 200.0)?,
+    })
+}
+
+fn parse_line_sensor_config(path: &Path, sensor_json: &JsonValue) -> CfgResult<LineSensorConfig> {
+    Ok(LineSensorConfig {
+        model: str_field(path, sensor_json, "model", "NoisyAdcSensor")?.to_string(),
+        count: num_field(sensor_json, "count", 16.0) as usize,
+        width_m: num_field(sensor_json, "width_mm", 72.0) / 1000.0,
+        forward_offset_m: num_field(sensor_json, "forward_offset_mm", 55.0) / 1000.0,
+        adc_bits: num_field(sensor_json, "adc_bits", 12.0) as u32,
+        gain: num_field(sensor_json, "gain", 1.0),
+        offset: num_field(sensor_json, "offset", 0.0),
+        reflectance_noise_std: num_field(sensor_json, "reflectance_noise_std", 0.01),
+        adc_noise_lsb: num_field(sensor_json, "adc_noise_lsb", 1.0),
+        seed: num_field(sensor_json, "seed", 0x51A5_0001 as f64) as u64,
     })
 }
 
