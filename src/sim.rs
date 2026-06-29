@@ -9,6 +9,7 @@ use crate::normal_force::{
     ConfiguredNormalForce, NormalForceInput, NormalForceModel, NormalForceOutput,
 };
 use crate::replay::BinaryReplayLogger;
+use crate::rtsim_track::{validate_track, Severity, TrackRulesMode};
 use crate::sensor::{SensorModel, SensorOutput, SimpleLineSensor};
 use crate::telemetry::{CsvLogger, TelemetrySample};
 use crate::track::{TrackModel, VectorTrack};
@@ -64,7 +65,7 @@ struct LastPhysics {
     battery: BatteryOutput,
 }
 
-/// Incremental simulation session used by the v0.4 visual simulator.
+/// Incremental simulation session used by the v0.08/v0.08 visual simulator.
 ///
 /// It reuses the same deterministic fixed-step core as `run_simulation`, but exposes
 /// small stepping methods so the GUI can advance and draw the robot without making
@@ -99,6 +100,7 @@ pub struct SimulationSession {
 
 impl SimulationSession {
     pub fn new(cfg: LoadedConfig, duration_us: Option<u64>) -> Result<Self, String> {
+        validate_track_for_simulation(&cfg)?;
         validate_time(&cfg.project.time)?;
         let time = cfg.project.time;
         let duration_us =
@@ -277,6 +279,7 @@ pub fn run_simulation(cfg: LoadedConfig, options: RunOptions) -> Result<RunSumma
         eprintln!("warning: visual UI is available from the app shell; run command continues to use the deterministic headless core");
     }
 
+    validate_track_for_simulation(&cfg)?;
     validate_time(&time)?;
 
     let duration_us = options
@@ -455,6 +458,32 @@ pub fn run_simulation(cfg: LoadedConfig, options: RunOptions) -> Result<RunSumma
         csv_path,
         replay_path,
     })
+}
+
+fn validate_track_for_simulation(cfg: &LoadedConfig) -> Result<(), String> {
+    let Some(track) = &cfg.track.parametric else {
+        return Ok(());
+    };
+    if track.rules.mode != TrackRulesMode::Strict {
+        return Ok(());
+    }
+    let issues: Vec<_> = validate_track(track)
+        .into_iter()
+        .filter(|issue| issue.severity == Severity::Error)
+        .collect();
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "track validation blocked simulation in strict mode: {}",
+            issues
+                .iter()
+                .take(3)
+                .map(|issue| issue.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        ))
+    }
 }
 
 fn validate_time(time: &TimeConfig) -> Result<(), String> {

@@ -1,5 +1,11 @@
 use crate::json::{parse_json, JsonValue};
 use crate::math::{Pose2, Vec2};
+use crate::rtsim_track::{
+    build_geometry, resolve_robot_start_pose, resolve_rules, ArcSegment, RobotStartConfig,
+    StartExitDirection, StartFinishMarking, StraightSegment, TrackArea, TrackClosureConfig,
+    TrackCornerMarkersConfig, TrackMarkings, TrackPose, TrackRuleOverrides, TrackRulesConfig,
+    TrackRulesMode, TrackSegment, TrackSurfaceConfig, TrackV2,
+};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -253,6 +259,9 @@ pub struct PidConfig {
 
 #[derive(Debug, Clone)]
 pub struct TrackConfig {
+    /// Schema of the file that was loaded/saved. `rtsim-track-v2` enables the
+    /// parametric segment-based track editor; `rtsim-track-v1` remains supported
+    /// as a legacy sampled polyline cache.
     pub schema: String,
     pub name: String,
     pub model: String,
@@ -260,7 +269,59 @@ pub struct TrackConfig {
     pub base_reflectance: f64,
     pub line_reflectance: f64,
     pub surface_mu: f64,
+    /// Sampled centerline cache used by the current simulation/runtime path.
+    /// For v2 files this is derived from `parametric` and is not the source of truth.
     pub centerline: Vec<Vec2>,
+    pub parametric: Option<TrackV2>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SurfaceProfile {
+    pub schema: String,
+    pub name: String,
+    pub rules_mode: TrackRulesMode,
+    pub line_width_mm: Option<f64>,
+    pub background_reflectance: f64,
+    pub line_reflectance: f64,
+    pub base_color: String,
+    pub line_color: String,
+    pub surface_mu: f64,
+    pub marker_profile: String,
+    pub overrides: TrackRuleOverrides,
+}
+
+impl TrackConfig {
+    pub fn from_parametric(mut track: TrackV2) -> Self {
+        track.schema = "rtsim-track-v2".to_string();
+        let mut cfg = Self {
+            schema: track.schema.clone(),
+            name: track.name.clone(),
+            model: "ParametricTrack".to_string(),
+            line_width_m: 0.019,
+            base_reflectance: track.surface.base_reflectance,
+            line_reflectance: track.surface.line_reflectance,
+            surface_mu: track.surface.surface_mu,
+            centerline: Vec::new(),
+            parametric: Some(track),
+        };
+        refresh_track_cache(&mut cfg);
+        cfg
+    }
+}
+
+pub fn refresh_track_cache(track: &mut TrackConfig) {
+    if let Some(parametric) = &mut track.parametric {
+        let rules = resolve_rules(&parametric.rules);
+        let geometry = build_geometry(parametric);
+        track.schema = parametric.schema.clone();
+        track.name = parametric.name.clone();
+        track.model = "ParametricTrack".to_string();
+        track.line_width_m = rules.line_width_mm / 1000.0;
+        track.base_reflectance = parametric.surface.base_reflectance;
+        track.line_reflectance = parametric.surface.line_reflectance;
+        track.surface_mu = parametric.surface.surface_mu;
+        track.centerline = geometry.centerline_m;
+    }
 }
 
 pub fn load_project(project_path: impl AsRef<Path>) -> CfgResult<LoadedConfig> {
@@ -276,6 +337,16 @@ pub fn load_project(project_path: impl AsRef<Path>) -> CfgResult<LoadedConfig> {
     let track_json = read_json(&track_path)?;
     let robot = parse_robot_config(&robot_path, &robot_json)?;
     let track = parse_track_config(&track_path, &track_json)?;
+    let mut project = project;
+    if let Some(parametric) = &track.parametric {
+        if let Some(start_pose) = resolve_robot_start_pose(parametric) {
+            project.start_pose = Pose2::new(
+                start_pose.x_mm / 1000.0,
+                start_pose.y_mm / 1000.0,
+                start_pose.heading_deg.to_radians(),
+            );
+        }
+    }
 
     Ok(LoadedConfig {
         project_path,
@@ -283,6 +354,46 @@ pub fn load_project(project_path: impl AsRef<Path>) -> CfgResult<LoadedConfig> {
         robot,
         track,
     })
+}
+
+pub fn load_track_from_file(path: impl AsRef<Path>) -> Result<TrackConfig, String> {
+    let path = path.as_ref();
+    let track_json = read_json(path).map_err(|err| err.to_string())?;
+    parse_track_config(path, &track_json).map_err(|err| err.to_string())
+}
+
+pub fn load_surface_profile_from_file(path: impl AsRef<Path>) -> Result<SurfaceProfile, String> {
+    let path = path.as_ref();
+    let profile_json = read_json(path).map_err(|err| err.to_string())?;
+    parse_surface_profile_config(path, &profile_json).map_err(|err| err.to_string())
+}
+
+pub fn apply_surface_profile(track: &mut TrackV2, profile: &SurfaceProfile) {
+    track.rules.profile = profile.name.clone();
+    track.rules.mode = profile.rules_mode;
+    track.rules.overrides = profile.overrides;
+    track.rules.overrides.line_width_mm = profile.line_width_mm;
+    track.surface.base_color = profile.base_color.clone();
+    track.surface.line_color = profile.line_color.clone();
+    track.surface.base_reflectance = profile.background_reflectance;
+    track.surface.line_reflectance = profile.line_reflectance;
+    track.surface.surface_mu = profile.surface_mu;
+}
+
+pub fn surface_profile_from_track(track: &TrackV2) -> SurfaceProfile {
+    SurfaceProfile {
+        schema: "rtsim-surface-profile-v1".to_string(),
+        name: track.rules.profile.clone(),
+        rules_mode: track.rules.mode,
+        line_width_mm: Some(resolve_rules(&track.rules).line_width_mm),
+        background_reflectance: track.surface.base_reflectance,
+        line_reflectance: track.surface.line_reflectance,
+        base_color: track.surface.base_color.clone(),
+        line_color: track.surface.line_color.clone(),
+        surface_mu: track.surface.surface_mu,
+        marker_profile: track.rules.profile.clone(),
+        overrides: track.rules.overrides,
+    }
 }
 
 fn normalize_child_path(base_dir: &Path, child: &Path) -> PathBuf {
@@ -672,6 +783,11 @@ fn parse_motor(value: &JsonValue) -> MotorConfig {
 
 fn parse_track_config(path: &Path, root: &JsonValue) -> CfgResult<TrackConfig> {
     let schema = str_field(path, root, "track_schema", "rtsim-track-v1")?.to_string();
+    if schema == "rtsim-track-v2" {
+        let parametric = parse_track_v2(path, root)?;
+        return Ok(TrackConfig::from_parametric(parametric));
+    }
+
     let name = str_field(path, root, "name", "unnamed-track")?.to_string();
     let model = str_field(path, root, "model", "VectorTrack")?.to_string();
     let line_width_m = num_field(root, "line_width_mm", 19.0) / 1000.0;
@@ -689,6 +805,268 @@ fn parse_track_config(path: &Path, root: &JsonValue) -> CfgResult<TrackConfig> {
         line_reflectance,
         surface_mu,
         centerline,
+        parametric: None,
+    })
+}
+
+fn parse_track_v2(path: &Path, root: &JsonValue) -> CfgResult<TrackV2> {
+    let schema = str_field(path, root, "track_schema", "rtsim-track-v2")?.to_string();
+    let name = str_field(path, root, "name", "unnamed-track")?.to_string();
+    let units = str_field(path, root, "units", "mm")?.to_string();
+
+    let area_json = root.get("area");
+    let area = TrackArea {
+        width_mm: nested_num(path, area_json, "width_mm", 3000.0)?,
+        height_mm: nested_num(path, area_json, "height_mm", 2000.0)?,
+        grid_mm: nested_num(path, area_json, "grid_mm", 100.0)?,
+    };
+
+    let origin_json = root.get("origin");
+    let origin = TrackPose {
+        x_mm: nested_num(path, origin_json, "x_mm", 500.0)?,
+        y_mm: nested_num(path, origin_json, "y_mm", 500.0)?,
+        heading_deg: nested_num(path, origin_json, "heading_deg", 0.0)?,
+    };
+
+    let rules = parse_track_rules(path, root.get("rules"))?;
+    let surface = parse_track_surface(path, root.get("surface"))?;
+    let segments = parse_track_segments(path, root)?;
+    let closure_json = root.get("closure");
+    let closure = TrackClosureConfig {
+        required: nested_bool(closure_json, "required", true),
+        position_tolerance_mm: nested_num(path, closure_json, "position_tolerance_mm", 0.5)?,
+        heading_tolerance_deg: nested_num(path, closure_json, "heading_tolerance_deg", 0.1)?,
+    };
+    let markings = parse_track_markings(path, root.get("markings"))?;
+
+    Ok(TrackV2 {
+        schema,
+        name,
+        units,
+        area,
+        origin,
+        rules,
+        surface,
+        segments,
+        closure,
+        markings,
+    })
+}
+
+fn parse_track_rules(path: &Path, value: Option<&JsonValue>) -> CfgResult<TrackRulesConfig> {
+    let profile = nested_str(value, "profile", "robotrace official").to_string();
+    let mode = TrackRulesMode::from_str(nested_str(value, "mode", "warning"));
+    let overrides = parse_track_rule_overrides(path, value.and_then(|v| v.get("overrides")))?;
+    Ok(TrackRulesConfig {
+        profile,
+        mode,
+        overrides,
+    })
+}
+
+fn parse_track_rule_overrides(
+    path: &Path,
+    overrides_json: Option<&JsonValue>,
+) -> CfgResult<TrackRuleOverrides> {
+    Ok(TrackRuleOverrides {
+        line_width_mm: optional_nested_num(path, overrides_json, "line_width_mm")?,
+        max_total_length_mm: optional_nested_num(path, overrides_json, "max_total_length_mm")?,
+        min_arc_radius_mm: optional_nested_num(path, overrides_json, "min_arc_radius_mm")?,
+        min_distance_between_curvature_changes_mm: optional_nested_num(
+            path,
+            overrides_json,
+            "min_distance_between_curvature_changes_mm",
+        )?,
+        intersection_angle_deg: optional_nested_num(
+            path,
+            overrides_json,
+            "intersection_angle_deg",
+        )?,
+        intersection_angle_tolerance_deg: optional_nested_num(
+            path,
+            overrides_json,
+            "intersection_angle_tolerance_deg",
+        )?,
+        min_straight_around_intersection_mm: optional_nested_num(
+            path,
+            overrides_json,
+            "min_straight_around_intersection_mm",
+        )?,
+        start_finish_must_be_on_straight: optional_nested_bool(
+            overrides_json,
+            "start_finish_must_be_on_straight",
+        ),
+        min_straight_around_start_finish_mm: optional_nested_num(
+            path,
+            overrides_json,
+            "min_straight_around_start_finish_mm",
+        )?,
+        start_goal_distance_mm: optional_nested_num(
+            path,
+            overrides_json,
+            "start_goal_distance_mm",
+        )?,
+        start_goal_area_half_width_mm: optional_nested_num(
+            path,
+            overrides_json,
+            "start_goal_area_half_width_mm",
+        )?,
+        min_table_edge_clearance_mm: optional_nested_num(
+            path,
+            overrides_json,
+            "min_table_edge_clearance_mm",
+        )?,
+        max_slope_deg: optional_nested_num(path, overrides_json, "max_slope_deg")?,
+    })
+}
+
+fn parse_surface_profile_config(path: &Path, root: &JsonValue) -> CfgResult<SurfaceProfile> {
+    let schema = str_field(
+        path,
+        root,
+        "surface_profile_schema",
+        "rtsim-surface-profile-v1",
+    )?
+    .to_string();
+    let rules_json = root.get("rules");
+    let surface_json = root.get("surface");
+    let overrides_json = rules_json
+        .and_then(|v| v.get("overrides"))
+        .or_else(|| root.get("overrides"));
+    let mut overrides = parse_track_rule_overrides(path, overrides_json)?;
+    let top_level_line_width = optional_nested_num(path, Some(root), "line_width_mm")?;
+    if top_level_line_width.is_some() {
+        overrides.line_width_mm = top_level_line_width;
+    }
+
+    let name = str_field(
+        path,
+        root,
+        "name",
+        nested_str(rules_json, "profile", "surface profile"),
+    )?
+    .to_string();
+    let rules_mode = root
+        .get("rules_mode")
+        .and_then(JsonValue::as_str)
+        .map(TrackRulesMode::from_str)
+        .unwrap_or_else(|| TrackRulesMode::from_str(nested_str(rules_json, "mode", "warning")));
+
+    let background_reflectance = optional_nested_num(path, Some(root), "background_reflectance")?
+        .or(optional_nested_num(path, Some(root), "base_reflectance")?)
+        .unwrap_or(nested_num(path, surface_json, "base_reflectance", 0.08)?);
+    let line_reflectance = optional_nested_num(path, Some(root), "line_reflectance")?
+        .unwrap_or(nested_num(path, surface_json, "line_reflectance", 0.86)?);
+
+    Ok(SurfaceProfile {
+        schema,
+        name: name.clone(),
+        rules_mode,
+        line_width_mm: overrides.line_width_mm,
+        background_reflectance,
+        line_reflectance,
+        base_color: root
+            .get("base_color")
+            .and_then(JsonValue::as_str)
+            .unwrap_or_else(|| nested_str(surface_json, "base_color", "black"))
+            .to_string(),
+        line_color: root
+            .get("line_color")
+            .and_then(JsonValue::as_str)
+            .unwrap_or_else(|| nested_str(surface_json, "line_color", "white"))
+            .to_string(),
+        surface_mu: optional_nested_num(path, Some(root), "surface_mu")?.unwrap_or(nested_num(
+            path,
+            surface_json,
+            "surface_mu",
+            1.20,
+        )?),
+        marker_profile: root
+            .get("marker_profile")
+            .and_then(JsonValue::as_str)
+            .unwrap_or(&name)
+            .to_string(),
+        overrides,
+    })
+}
+
+fn parse_track_surface(path: &Path, value: Option<&JsonValue>) -> CfgResult<TrackSurfaceConfig> {
+    Ok(TrackSurfaceConfig {
+        base_color: nested_str(value, "base_color", "black").to_string(),
+        line_color: nested_str(value, "line_color", "white").to_string(),
+        base_reflectance: nested_num(path, value, "base_reflectance", 0.08)?,
+        line_reflectance: nested_num(path, value, "line_reflectance", 0.86)?,
+        surface_mu: nested_num(path, value, "surface_mu", 1.20)?,
+    })
+}
+
+fn parse_track_segments(path: &Path, root: &JsonValue) -> CfgResult<Vec<TrackSegment>> {
+    let arr = root
+        .get("segments")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| ConfigError::Missing {
+            path: path.to_path_buf(),
+            field: "segments".to_string(),
+        })?;
+    let mut segments = Vec::with_capacity(arr.len());
+    for (i, item) in arr.iter().enumerate() {
+        let kind = str_field(path, item, "kind", "straight")?;
+        let id = str_field(path, item, "id", "")?.to_string();
+        match kind {
+            "straight" | "reta" => segments.push(TrackSegment::Straight(StraightSegment {
+                id: if id.is_empty() {
+                    format!("R{}", i + 1)
+                } else {
+                    id
+                },
+                length_mm: required_num(path, item, "length_mm")?,
+            })),
+            "arc" | "arco" => segments.push(TrackSegment::Arc(ArcSegment {
+                id: if id.is_empty() {
+                    format!("C{}", i + 1)
+                } else {
+                    id
+                },
+                radius_mm: required_num(path, item, "radius_mm")?,
+                sweep_deg: required_num(path, item, "sweep_deg")?,
+            })),
+            other => {
+                return Err(ConfigError::Invalid {
+                    path: path.to_path_buf(),
+                    field: format!("segments[{i}].kind"),
+                    message: format!("unsupported segment kind '{other}'"),
+                })
+            }
+        }
+    }
+    Ok(segments)
+}
+
+fn parse_track_markings(path: &Path, value: Option<&JsonValue>) -> CfgResult<TrackMarkings> {
+    let start_finish_json = value.and_then(|v| v.get("start_finish"));
+    let robot_start_json = start_finish_json.and_then(|v| v.get("robot_start"));
+    let corner_json = value.and_then(|v| v.get("corner_markers"));
+    Ok(TrackMarkings {
+        start_finish: StartFinishMarking {
+            enabled: nested_bool(start_finish_json, "enabled", true),
+            segment_id: nested_str(start_finish_json, "segment_id", "R1").to_string(),
+            start_s_mm: nested_num(path, start_finish_json, "start_s_mm", 100.0)?,
+            distance_mm: nested_num(path, start_finish_json, "distance_mm", 1000.0)?,
+            margin_mm: nested_num(path, start_finish_json, "margin_mm", 100.0)?,
+            exit_direction: StartExitDirection::from_str(nested_str(
+                start_finish_json,
+                "exit_direction",
+                "to_increasing_s",
+            )),
+            robot_start: RobotStartConfig {
+                delta_x_mm: nested_num(path, robot_start_json, "delta_x_mm", 125.0)?,
+                delta_y_mm: nested_num(path, robot_start_json, "delta_y_mm", 0.0)?,
+                heading_deg: nested_num(path, robot_start_json, "heading_deg", 0.0)?,
+            },
+        },
+        corner_markers: TrackCornerMarkersConfig {
+            auto_generate: nested_bool(corner_json, "auto_generate", true),
+        },
     })
 }
 
@@ -772,6 +1150,40 @@ fn num_field(root: &JsonValue, field: &str, default: f64) -> f64 {
     root.get(field)
         .and_then(JsonValue::as_f64)
         .unwrap_or(default)
+}
+
+fn required_num(path: &Path, root: &JsonValue, field: &str) -> CfgResult<f64> {
+    root.get(field)
+        .and_then(JsonValue::as_f64)
+        .ok_or_else(|| ConfigError::Missing {
+            path: path.to_path_buf(),
+            field: field.to_string(),
+        })
+}
+
+fn optional_nested_num(
+    path: &Path,
+    root: Option<&JsonValue>,
+    field: &str,
+) -> CfgResult<Option<f64>> {
+    match root.and_then(|v| v.get(field)) {
+        Some(v) => v.as_f64().map(Some).ok_or_else(|| ConfigError::Invalid {
+            path: path.to_path_buf(),
+            field: field.to_string(),
+            message: "expected number".to_string(),
+        }),
+        None => Ok(None),
+    }
+}
+
+fn optional_nested_bool(root: Option<&JsonValue>, field: &str) -> Option<bool> {
+    root.and_then(|v| v.get(field)).and_then(JsonValue::as_bool)
+}
+
+fn optional_nested_str(root: Option<&JsonValue>, field: &str) -> Option<String> {
+    root.and_then(|v| v.get(field))
+        .and_then(JsonValue::as_str)
+        .map(str::to_string)
 }
 
 fn nested_str<'a>(root: Option<&'a JsonValue>, field: &str, default: &'a str) -> &'a str {

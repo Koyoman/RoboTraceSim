@@ -1,0 +1,21 @@
+{
+  "surface_profile_schema": "rtsim-surface-profile-v1",
+  "name": "custom training",
+  "line_width_mm": 25.000000000,
+  "background_reflectance": 0.120000000,
+  "line_reflectance": 0.820000000,
+  "marker_profile": "custom training",
+  "rules": {
+    "mode": "free",
+    "overrides": {
+      "line_width_mm": 25.000000000
+    }
+  },
+  "surface": {
+    "base_color": "black",
+    "line_color": "white",
+    "base_reflectance": 0.120000000,
+    "line_reflectance": 0.820000000,
+    "surface_mu": 1.100000000
+  }
+}

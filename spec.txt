@@ -1,4 +1,4 @@
-Especificação inicial — Robotrace Sim v0.1
+Especificação inicial — Robotrace Sim v0.08
 1. Objetivo do projeto
 
 Criar um simulador de robôs seguidores de linha com foco em realismo físico, modularidade e reaproveitamento parcial dos dados em robôs reais.

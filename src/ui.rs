@@ -1,13 +1,28 @@
 #[cfg(feature = "gui")]
 mod gui {
+    use crate::calibration::{
+        compare_project_with_real, import_real_log, tune_project_against_real,
+        write_comparison_csv, write_comparison_report, write_normalized_real_log,
+        write_tuning_report, ComparisonMetrics,
+    };
     use crate::config::load_project;
     use crate::config::{
-        BatteryConfig, ChassisConfig, DrivetrainConfig, EncoderConfig, FanConfig, GyroConfig,
-        LineSensorConfig, LoadedConfig, MotorConfig, NormalForceConfig, PidConfig, ProjectConfig,
-        RobotConfig, TimeConfig, TireConfig, TrackConfig,
+        apply_surface_profile, load_surface_profile_from_file, load_track_from_file,
+        refresh_track_cache, surface_profile_from_track, BatteryConfig, ChassisConfig,
+        DrivetrainConfig, EncoderConfig, FanConfig, GyroConfig, LineSensorConfig, LoadedConfig,
+        MotorConfig, NormalForceConfig, PidConfig, ProjectConfig, RobotConfig, SurfaceProfile,
+        TimeConfig, TireConfig, TrackConfig,
     };
     use crate::math::{Pose2, Vec2};
     use crate::replay::{export_replay_to_csv, load_replay_samples, ReplayData};
+    use crate::rtsim_track::{
+        auto_close_with_straight, build_geometry, center_start_finish_on_segment,
+        clamp_start_finish_to_segment, next_segment_id, resolve_robot_start_pose, resolve_rules,
+        resolve_start_finish_markers, robot_start_allowed_area_corners,
+        start_finish_required_length_mm, valid_start_finish_segments, validate_track, ArcSegment,
+        MarkerSide, Severity, StartExitDirection, StraightSegment, TrackRulesMode, TrackSegment,
+        TrackV2, ROBOT_START_MARKER_CLEARANCE_MM, ROBOT_START_MAX_LATERAL_OFFSET_MM,
+    };
     use crate::sim::{run_simulation, RunOptions, SimulationSession};
     use crate::telemetry::TelemetrySample;
     use eframe::egui;
@@ -21,16 +36,71 @@ mod gui {
         RobotEditor,
         VisualSimulator,
         ReplayViewer,
+        CalibrationTools,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum TrackFileCommand {
+        None,
+        New,
+        Load,
+        Save,
+        SaveAs,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum SurfaceProfileCommand {
+        None,
+        New,
+        Load,
+        Save,
+        SaveAs,
+    }
+
+    #[derive(Debug, Default, Clone, Copy)]
+    struct TrackPanelChanges {
+        track_changed: bool,
+        surface_changed: bool,
+    }
+
+    impl TrackPanelChanges {
+        fn any(self) -> bool {
+            self.track_changed || self.surface_changed
+        }
     }
 
     pub fn run_app() -> Result<(), String> {
         let options = eframe::NativeOptions::default();
         eframe::run_native(
-            "Robotrace Sim v0.4",
+            "Robotrace Sim v0.08",
             options,
             Box::new(|cc| Box::new(RTSimApp::new(cc))),
         )
         .map_err(|err| err.to_string())
+    }
+
+    fn json_file_name_from_name(name: &str, fallback: &str) -> String {
+        let mut cleaned = name
+            .trim()
+            .chars()
+            .map(|c| match c {
+                '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+                c if c.is_control() => '_',
+                c => c,
+            })
+            .collect::<String>();
+
+        cleaned = cleaned.trim_matches([' ', '.']).to_string();
+
+        if cleaned.is_empty() {
+            cleaned = fallback.to_string();
+        }
+
+        if !cleaned.to_lowercase().ends_with(".json") {
+            cleaned.push_str(".json");
+        }
+
+        cleaned
     }
 
     struct RTSimApp {
@@ -38,8 +108,14 @@ mod gui {
         cfg: Option<LoadedConfig>,
         project_path_text: String,
         replay_path_text: String,
+        track_file_path_text: String,
+        track_dirty: bool,
+        surface_profile_path_text: String,
+        surface_profile_dirty: bool,
         status: String,
         selected_track_point: Option<usize>,
+        track_view_zoom: f32,
+        track_view_pan_m: Vec2,
         sim_session: Option<SimulationSession>,
         sim_running: bool,
         sim_steps_per_frame: u64,
@@ -48,17 +124,32 @@ mod gui {
         replay: Option<ReplayData>,
         replay_index: usize,
         replay_max_samples: usize,
+        real_log_path_text: String,
+        calibration_csv_path_text: String,
+        calibration_report_path_text: String,
+        tuning_output_path_text: String,
+        last_calibration_metrics: Option<ComparisonMetrics>,
     }
 
     impl RTSimApp {
+        fn path_text(path: &Path) -> String {
+            path.to_string_lossy().replace('\\', "/")
+        }
+
         fn new(_cc: &eframe::CreationContext<'_>) -> Self {
             let mut app = Self {
                 view: AppView::Home,
                 cfg: None,
                 project_path_text: "examples/basic/projeto.rtsim".to_string(),
                 replay_path_text: "examples/basic/resultado.rtlog".to_string(),
+                track_file_path_text: "examples/basic/track.json".to_string(),
+                track_dirty: false,
+                surface_profile_path_text: "examples/profiles/rob_trace_official.json".to_string(),
+                surface_profile_dirty: false,
                 status: "Abra um projeto .rtsim ou use o exemplo básico.".to_string(),
                 selected_track_point: None,
+                track_view_zoom: 1.0,
+                track_view_pan_m: Vec2::new(0.0, 0.0),
                 sim_session: None,
                 sim_running: false,
                 sim_steps_per_frame: 40,
@@ -67,11 +158,16 @@ mod gui {
                 replay: None,
                 replay_index: 0,
                 replay_max_samples: 200_000,
+                real_log_path_text: "examples/basic/real_log_demo.csv".to_string(),
+                calibration_csv_path_text: "examples/basic/comparacao_v05.csv".to_string(),
+                calibration_report_path_text: "examples/basic/comparacao_v05.txt".to_string(),
+                tuning_output_path_text: "examples/basic/ajuste_v05.json".to_string(),
+                last_calibration_metrics: None,
             };
             if Path::new(&app.project_path_text).exists() {
                 app.load_project_from_path(PathBuf::from(app.project_path_text.clone()));
             } else {
-                app.cfg = Some(default_loaded_config(PathBuf::from("projeto_v04.rtsim")));
+                app.cfg = Some(default_loaded_config(PathBuf::from("projeto_v05.rtsim")));
             }
             app
         }
@@ -86,7 +182,25 @@ mod gui {
                     self.project_path_text = path.display().to_string();
                     self.sim_duration_s = cfg.project.duration_s;
                     self.replay_path_text = default_replay_path(&cfg).display().to_string();
+                    self.track_file_path_text =
+                        resolve_child_path(&cfg.project_path, &cfg.project.track_path)
+                            .display()
+                            .to_string();
+                    self.surface_profile_path_text = cfg
+                        .track
+                        .parametric
+                        .as_ref()
+                        .map(|track| default_surface_profile_path(&track.rules.profile))
+                        .unwrap_or_else(|| {
+                            PathBuf::from("examples/profiles/rob_trace_official.json")
+                        })
+                        .display()
+                        .to_string();
+                    self.track_dirty = false;
+                    self.surface_profile_dirty = false;
                     self.selected_track_point = None;
+                    self.track_view_zoom = 1.0;
+                    self.track_view_pan_m = Vec2::new(0.0, 0.0);
                     self.sim_session = None;
                     self.last_sim_sample = None;
                     self.cfg = Some(cfg);
@@ -103,8 +217,246 @@ mod gui {
                 .ok_or_else(|| "nenhum projeto carregado".to_string())
                 .and_then(save_loaded_config);
             match result {
-                Ok(()) => self.set_status("Projeto, robô e pista salvos."),
+                Ok(()) => {
+                    self.track_dirty = false;
+                    self.set_status("Projeto, robô e pista salvos.");
+                }
                 Err(err) => self.set_status(format!("Falha ao salvar: {err}")),
+            }
+        }
+
+        fn update_project_start_pose_from_track(cfg: &mut LoadedConfig) {
+            if let Some(parametric) = &cfg.track.parametric {
+                if let Some(start_pose) = resolve_robot_start_pose(parametric) {
+                    cfg.project.start_pose = Pose2::new(
+                        start_pose.x_mm / 1000.0,
+                        start_pose.y_mm / 1000.0,
+                        start_pose.heading_deg.to_radians(),
+                    );
+                }
+            }
+        }
+
+        fn reset_track_editor_state(&mut self) {
+            self.selected_track_point = None;
+            self.track_view_zoom = 1.0;
+            self.track_view_pan_m = Vec2::new(0.0, 0.0);
+            self.sim_session = None;
+            self.last_sim_sample = None;
+        }
+
+        fn create_new_track(&mut self) {
+            if self.track_dirty {
+                self.set_status(
+                    "There are unsaved track changes. Save or discard before creating another track.",
+                );
+                return;
+            }
+
+            let Some(cfg) = self.cfg.as_mut() else {
+                self.set_status("Nenhum projeto carregado para receber uma nova pista.");
+                return;
+            };
+
+            let mut track = TrackV2::default_closed_rectangle();
+            track.name = "New Track".to_string();
+            track.segments.clear();
+            track.markings.start_finish.segment_id = "R1".to_string();
+            cfg.track = TrackConfig::from_parametric(track);
+            Self::update_project_start_pose_from_track(cfg);
+            self.track_file_path_text = "examples/basic/new_track.json".to_string();
+            self.surface_profile_path_text =
+                "examples/profiles/rob_trace_official.json".to_string();
+            self.track_dirty = true;
+            self.surface_profile_dirty = true;
+            self.reset_track_editor_state();
+            self.set_status("New empty track created.");
+        }
+
+        fn load_track_asset(&mut self) {
+            if self.track_dirty {
+                self.set_status(
+                    "There are unsaved track changes. Save or discard before loading another track.",
+                );
+                return;
+            }
+
+            let raw_path = self.track_file_path_text.trim();
+            if raw_path.is_empty() {
+                self.set_status("Track file path is empty.");
+                return;
+            }
+            let project_path = self.cfg.as_ref().map(|cfg| cfg.project_path.as_path());
+            let path = resolve_asset_path_text(project_path, raw_path);
+            match load_track_from_file(&path) {
+                Ok(mut track) => {
+                    refresh_track_cache(&mut track);
+                    if let Some(cfg) = self.cfg.as_mut() {
+                        cfg.project.track_path = path_relative_to_project(&cfg.project_path, &path);
+                        cfg.track = track;
+                        Self::update_project_start_pose_from_track(cfg);
+                    } else {
+                        let mut cfg = default_loaded_config(PathBuf::from("projeto_v05.rtsim"));
+                        cfg.project.track_path = path.clone();
+                        cfg.track = track;
+                        Self::update_project_start_pose_from_track(&mut cfg);
+                        self.cfg = Some(cfg);
+                    }
+                    self.track_file_path_text = Self::path_text(&path);
+                    if let Some(profile_name) = self
+                        .cfg
+                        .as_ref()
+                        .and_then(|cfg| cfg.track.parametric.as_ref())
+                        .map(|track| track.rules.profile.clone())
+                    {
+                        self.surface_profile_path_text =
+                            default_surface_profile_path(&profile_name)
+                                .display()
+                                .to_string();
+                    }
+                    self.track_dirty = false;
+                    self.surface_profile_dirty = false;
+                    self.reset_track_editor_state();
+                    self.set_status(format!("Track loaded from {}", path.display()));
+                }
+                Err(err) => self.set_status(format!("Failed to load track: {err}")),
+            }
+        }
+
+        fn save_track_asset(&mut self, save_as: bool) {
+            let raw_path = self.track_file_path_text.trim();
+            if raw_path.is_empty() {
+                self.set_status("Track file path is empty.");
+                return;
+            }
+            let project_path = self.cfg.as_ref().map(|cfg| cfg.project_path.as_path());
+            let path = resolve_asset_path_text(project_path, raw_path);
+
+            let result = self
+                .cfg
+                .as_ref()
+                .ok_or_else(|| "nenhuma pista carregada".to_string())
+                .and_then(|cfg| save_track_to_file(&cfg.track, &path));
+
+            match result {
+                Ok(()) => {
+                    if let Some(cfg) = self.cfg.as_mut() {
+                        cfg.project.track_path = path_relative_to_project(&cfg.project_path, &path);
+                    }
+                    self.track_file_path_text = path.display().to_string();
+                    self.track_dirty = false;
+                    if save_as {
+                        self.set_status(format!("Track saved as {}", path.display()));
+                    } else {
+                        self.set_status(format!("Track saved to {}", path.display()));
+                    }
+                }
+                Err(err) => self.set_status(format!("Failed to save track: {err}")),
+            }
+        }
+
+        fn create_new_surface_profile(&mut self) {
+            if self.surface_profile_dirty {
+                self.set_status(
+                    "There are unsaved surface profile changes. Save or discard before creating another profile.",
+                );
+                return;
+            }
+
+            let Some(cfg) = self.cfg.as_mut() else {
+                self.set_status("Nenhuma pista carregada para receber um surface profile.");
+                return;
+            };
+            let Some(track) = cfg.track.parametric.as_mut() else {
+                self.set_status("Surface profiles are available only for parametric tracks.");
+                return;
+            };
+
+            let mut profile = surface_profile_from_track(track);
+            profile.name = "custom training".to_string();
+            profile.marker_profile = profile.name.clone();
+            profile.rules_mode = TrackRulesMode::Warning;
+            profile.line_width_mm = Some(19.0);
+            profile.background_reflectance = 0.08;
+            profile.line_reflectance = 0.86;
+            apply_surface_profile(track, &profile);
+            refresh_track_cache(&mut cfg.track);
+            self.surface_profile_path_text = "examples/profiles/custom_training.json".to_string();
+            self.track_dirty = true;
+            self.surface_profile_dirty = true;
+            self.sim_session = None;
+            self.last_sim_sample = None;
+            self.set_status("New surface profile created and applied to the current track.");
+        }
+
+        fn load_surface_profile_asset(&mut self) {
+            if self.surface_profile_dirty {
+                self.set_status(
+                    "There are unsaved surface profile changes. Save or discard before loading another profile.",
+                );
+                return;
+            }
+
+            let raw_path = self.surface_profile_path_text.trim();
+            if raw_path.is_empty() {
+                self.set_status("Surface profile file path is empty.");
+                return;
+            }
+            let project_path = self.cfg.as_ref().map(|cfg| cfg.project_path.as_path());
+            let path = resolve_asset_path_text(project_path, raw_path);
+            match load_surface_profile_from_file(&path) {
+                Ok(profile) => {
+                    let Some(cfg) = self.cfg.as_mut() else {
+                        self.set_status("Nenhuma pista carregada para aplicar o profile.");
+                        return;
+                    };
+                    let Some(track) = cfg.track.parametric.as_mut() else {
+                        self.set_status(
+                            "Surface profiles are available only for parametric tracks.",
+                        );
+                        return;
+                    };
+                    apply_surface_profile(track, &profile);
+                    refresh_track_cache(&mut cfg.track);
+                    self.surface_profile_path_text = Self::path_text(&path);
+                    self.track_dirty = true;
+                    self.surface_profile_dirty = false;
+                    self.sim_session = None;
+                    self.last_sim_sample = None;
+                    self.set_status(format!("Surface profile loaded from {}", path.display()));
+                }
+                Err(err) => self.set_status(format!("Failed to load surface profile: {err}")),
+            }
+        }
+
+        fn save_surface_profile_asset(&mut self, save_as: bool) {
+            let raw_path = self.surface_profile_path_text.trim();
+            if raw_path.is_empty() {
+                self.set_status("Surface profile file path is empty.");
+                return;
+            }
+            let project_path = self.cfg.as_ref().map(|cfg| cfg.project_path.as_path());
+            let path = resolve_asset_path_text(project_path, raw_path);
+
+            let result = self
+                .cfg
+                .as_ref()
+                .and_then(|cfg| cfg.track.parametric.as_ref())
+                .ok_or_else(|| "nenhuma pista paramétrica carregada".to_string())
+                .map(surface_profile_from_track)
+                .and_then(|profile| save_surface_profile_to_file(&profile, &path));
+
+            match result {
+                Ok(()) => {
+                    self.surface_profile_path_text = path.display().to_string();
+                    self.surface_profile_dirty = false;
+                    if save_as {
+                        self.set_status(format!("Surface profile saved as {}", path.display()));
+                    } else {
+                        self.set_status(format!("Surface profile saved to {}", path.display()));
+                    }
+                }
+                Err(err) => self.set_status(format!("Failed to save surface profile: {err}")),
             }
         }
 
@@ -182,29 +534,109 @@ mod gui {
             }
         }
 
+        fn import_real_log_ui(&mut self) {
+            let input = PathBuf::from(self.real_log_path_text.trim());
+            let output = PathBuf::from(self.calibration_csv_path_text.trim())
+                .with_file_name("real_normalized_v05.csv");
+            match import_real_log(&input).and_then(|log| {
+                write_normalized_real_log(&log, &output)
+                    .map_err(|e| format!("Falha ao salvar log normalizado: {e}"))?;
+                Ok((log.samples.len(), log.sensor_count))
+            }) {
+                Ok((samples, sensors)) => self.set_status(format!(
+                    "Log real importado: {samples} amostras, {sensors} sensores. Normalizado em {}.",
+                    output.display()
+                )),
+                Err(err) => self.set_status(format!("Falha ao importar log real: {err}")),
+            }
+        }
+
+        fn compare_real_log_ui(&mut self) {
+            let Some(cfg) = self.cfg.clone() else {
+                self.set_status("Carregue um projeto antes de comparar com log real.");
+                return;
+            };
+            let real_path = PathBuf::from(self.real_log_path_text.trim());
+            let csv_path = PathBuf::from(self.calibration_csv_path_text.trim());
+            let report_path = PathBuf::from(self.calibration_report_path_text.trim());
+            let result = import_real_log(&real_path).and_then(|real| {
+                let report = compare_project_with_real(cfg, &real, None)?;
+                write_comparison_csv(&report, &csv_path)
+                    .map_err(|e| format!("Falha ao salvar CSV de comparação: {e}"))?;
+                write_comparison_report(&report, &report_path)
+                    .map_err(|e| format!("Falha ao salvar relatório: {e}"))?;
+                Ok(report.metrics)
+            });
+            match result {
+                Ok(metrics) => {
+                    self.last_calibration_metrics = Some(metrics.clone());
+                    self.set_status(format!(
+                        "Comparação concluída: erro RMS trajetória {:.4} m, velocidade {:.4} m/s, sensores {:.2} ADC.",
+                        metrics.trajectory_error_m.rms,
+                        metrics.speed_error_m_s.rms,
+                        metrics.sensor_error_adc.rms
+                    ));
+                }
+                Err(err) => self.set_status(format!("Falha na comparação: {err}")),
+            }
+        }
+
+        fn tune_real_log_ui(&mut self) {
+            let Some(cfg) = self.cfg.clone() else {
+                self.set_status("Carregue um projeto antes de ajustar parâmetros.");
+                return;
+            };
+            let real_path = PathBuf::from(self.real_log_path_text.trim());
+            let output = PathBuf::from(self.tuning_output_path_text.trim());
+            let result = import_real_log(&real_path).and_then(|real| {
+                let report = tune_project_against_real(cfg, &real, None)?;
+                write_tuning_report(&report, &output)
+                    .map_err(|e| format!("Falha ao salvar ajuste: {e}"))?;
+                Ok(report)
+            });
+            match result {
+                Ok(report) => {
+                    self.last_calibration_metrics = Some(report.best.metrics.clone());
+                    self.set_status(format!(
+                        "Ajuste concluído: score {:.5} -> {:.5}, μ={:.3}, escala torque={:.3}.",
+                        report.baseline.score,
+                        report.best.metrics.score,
+                        report.best.mu_longitudinal,
+                        report.best.stall_torque_scale
+                    ));
+                }
+                Err(err) => self.set_status(format!("Falha no ajuste de parâmetros: {err}")),
+            }
+        }
+
         fn sidebar(&mut self, ctx: &egui::Context) {
             egui::SidePanel::left("main_navigation")
                 .resizable(false)
                 .default_width(190.0)
                 .show(ctx, |ui| {
-                    ui.heading("RTSim v0.4");
-                    ui.label("Interface única");
+                    ui.heading("RTSim v0.09");
                     ui.separator();
                     nav_button(ui, &mut self.view, AppView::Home, "Home");
-                    nav_button(ui, &mut self.view, AppView::TrackEditor, "Editor de pista");
-                    nav_button(ui, &mut self.view, AppView::RobotEditor, "Editor de robô");
+                    nav_button(ui, &mut self.view, AppView::TrackEditor, "Track Editor");
+                    nav_button(ui, &mut self.view, AppView::RobotEditor, "Robot Editor");
                     nav_button(
                         ui,
                         &mut self.view,
                         AppView::VisualSimulator,
-                        "Simulador visual",
+                        "Simulator visual",
                     );
                     nav_button(ui, &mut self.view, AppView::ReplayViewer, "Replay viewer");
+                    nav_button(
+                        ui,
+                        &mut self.view,
+                        AppView::CalibrationTools,
+                        "Calibração v0.5",
+                    );
                     ui.separator();
-                    if ui.button("Salvar tudo").clicked() {
+                    if ui.button("Save").clicked() {
                         self.save_current_project();
                     }
-                    if ui.button("Recarregar projeto").clicked() {
+                    if ui.button("Reload").clicked() {
                         self.load_project_from_path(PathBuf::from(self.project_path_text.clone()));
                     }
                     ui.separator();
@@ -236,12 +668,17 @@ mod gui {
                     self.load_project_from_path(PathBuf::from(self.project_path_text.clone()));
                 }
                 if ui.button("Novo projeto em memória").clicked() {
-                    self.cfg = Some(default_loaded_config(PathBuf::from("projeto_v04.rtsim")));
-                    self.project_path_text = "projeto_v04.rtsim".to_string();
+                    self.cfg = Some(default_loaded_config(PathBuf::from("projeto_v05.rtsim")));
+                    self.project_path_text = "projeto_v05.rtsim".to_string();
+                    self.track_file_path_text = "track.json".to_string();
+                    self.surface_profile_path_text =
+                        "examples/profiles/rob_trace_official.json".to_string();
+                    self.track_dirty = false;
+                    self.surface_profile_dirty = false;
                     self.sim_session = None;
                     self.last_sim_sample = None;
                     self.set_status(
-                        "Novo projeto v0.4 criado em memória. Ajuste e salve quando quiser.",
+                        "Novo projeto v0.5 criado em memória. Ajuste e salve quando quiser.",
                     );
                 }
                 if ui.button("Salvar").clicked() {
@@ -298,6 +735,9 @@ mod gui {
                     if ui.button("Abrir replay viewer").clicked() {
                         self.view = AppView::ReplayViewer;
                     }
+                    if ui.button("Abrir calibração v0.5").clicked() {
+                        self.view = AppView::CalibrationTools;
+                    }
                 });
             } else {
                 ui.colored_label(
@@ -308,156 +748,191 @@ mod gui {
         }
 
         fn show_track_editor(&mut self, ui: &mut egui::Ui) {
-            ui.heading("Editor de pista");
-            let mut save_clicked = false;
             let mut invalidate_sim = false;
-            if let Some(cfg) = self.cfg.as_mut() {
-                ui.horizontal(|ui| {
-                    ui.label("Nome");
-                    if ui.text_edit_singleline(&mut cfg.track.name).changed() {
-                        invalidate_sim = true;
-                    }
-                    ui.label("Modelo");
-                    ui.text_edit_singleline(&mut cfg.track.model);
-                });
-                ui.horizontal(|ui| {
-                    let mut line_width_mm = cfg.track.line_width_m * 1000.0;
-                    ui.label("Largura da linha [mm]");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut line_width_mm)
-                                .speed(0.1)
-                                .clamp_range(1.0..=100.0),
-                        )
-                        .changed()
-                    {
-                        cfg.track.line_width_m = line_width_mm / 1000.0;
-                        invalidate_sim = true;
-                    }
-                    ui.label("Atrito superfície μ");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut cfg.track.surface_mu)
-                                .speed(0.01)
-                                .clamp_range(0.05..=5.0),
-                        )
-                        .changed()
-                    {
-                        invalidate_sim = true;
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Refletância base");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut cfg.track.base_reflectance)
-                                .speed(0.01)
-                                .clamp_range(0.0..=1.0),
-                        )
-                        .changed()
-                    {
-                        invalidate_sim = true;
-                    }
-                    ui.label("Refletância linha");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut cfg.track.line_reflectance)
-                                .speed(0.01)
-                                .clamp_range(0.0..=1.0),
-                        )
-                        .changed()
-                    {
-                        invalidate_sim = true;
-                    }
-                });
-                ui.separator();
+            let mut status_to_set: Option<String> = None;
+            let mut selected_track_point = self.selected_track_point;
+            let mut track_view_zoom = self.track_view_zoom;
+            let mut track_view_pan_m = self.track_view_pan_m;
+            let mut track_file_path_text = self.track_file_path_text.clone();
+            let mut surface_profile_path_text = self.surface_profile_path_text.clone();
+            let mut track_file_command = TrackFileCommand::None;
+            let mut surface_profile_command = SurfaceProfileCommand::None;
+            let mut local_track_dirty = self.track_dirty;
+            let mut local_surface_profile_dirty = self.surface_profile_dirty;
 
-                let canvas_response =
-                    draw_editable_track_canvas(ui, &mut cfg.track, &mut self.selected_track_point);
-                if canvas_response.changed {
+            if let Some(cfg) = self.cfg.as_mut() {
+                let preview_track = cfg.track.clone();
+                let preview_geometry = cfg.track.parametric.as_ref().map(build_geometry);
+                let full_size = ui.available_size_before_wrap();
+                let total_width = full_size.x;
+                let total_height = full_size.y.max(360.0);
+                let right_width = 380.0;
+                let track_to_panel_gap = 2.0;
+                let right_window_margin = 28.0;
+                let left_width =
+                    (total_width - right_width - track_to_panel_gap - right_window_margin)
+                        .max(300.0);
+
+                let mut panel_changes = TrackPanelChanges::default();
+                ui.allocate_ui_with_layout(
+                    egui::vec2(total_width, total_height),
+                    egui::Layout::left_to_right(egui::Align::Min),
+                    |ui| {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(left_width, total_height),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui.set_min_size(egui::vec2(left_width, total_height));
+                                ui.set_max_width(left_width);
+                                ui.horizontal(|ui| {
+                                    ui.heading("Editor de pista");
+                                    ui.add_space(8.0);
+                                    ui.label("canvas + grid + marcações");
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui.small_button("Fit").clicked() {
+                                                track_view_zoom = 1.0;
+                                                track_view_pan_m = Vec2::new(0.0, 0.0);
+                                            }
+                                            ui.label(format!(
+                                                "Zoom {:.0}%",
+                                                track_view_zoom * 100.0
+                                            ));
+                                            if ui.small_button("+").clicked() {
+                                                track_view_zoom =
+                                                    (track_view_zoom * 1.20).clamp(0.25, 12.0);
+                                            }
+                                            if ui.small_button("−").clicked() {
+                                                track_view_zoom =
+                                                    (track_view_zoom / 1.20).clamp(0.25, 12.0);
+                                            }
+                                        },
+                                    );
+                                });
+                                if let Some(geometry) = &preview_geometry {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label(format!(
+                                            "Comprimento total: {:.3} m",
+                                            geometry.total_length_mm / 1000.0
+                                        ));
+                                        let err = geometry.closure_error;
+                                        let closed = if let Some(track) = &preview_track.parametric
+                                        {
+                                            err.distance_mm <= track.closure.position_tolerance_mm
+                                                && err.heading_error_deg.abs()
+                                                    <= track.closure.heading_tolerance_deg
+                                        } else {
+                                            false
+                                        };
+                                        let color = if closed {
+                                            egui::Color32::from_rgb(30, 130, 60)
+                                        } else {
+                                            egui::Color32::from_rgb(190, 55, 45)
+                                        };
+                                        ui.colored_label(
+                                            color,
+                                            format!(
+                                                "Fechamento: dx={:.2} mm, dy={:.2} mm, dθ={:.3}°",
+                                                err.dx_mm, err.dy_mm, err.heading_error_deg
+                                            ),
+                                        );
+                                    });
+                                }
+
+                                let canvas_height = ui.available_height().max(260.0);
+                                draw_track_view_with_height_zoomable(
+                                    ui,
+                                    &preview_track,
+                                    None,
+                                    &[],
+                                    canvas_height,
+                                    &mut track_view_zoom,
+                                    &mut track_view_pan_m,
+                                );
+                            },
+                        );
+
+                        ui.add_space(track_to_panel_gap);
+
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(right_width, total_height),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui.set_min_size(egui::vec2(right_width, total_height));
+                                ui.set_max_width(right_width);
+                                egui::ScrollArea::vertical()
+                                    .id_source("track_editor_right_panel_scroll")
+                                    .max_height(total_height)
+                                    .show(ui, |ui| {
+                                        let track =
+                                            cfg.track.parametric.as_mut().expect("checked above");
+                                        panel_changes = edit_track_properties_panel(
+                                            ui,
+                                            track,
+                                            &mut selected_track_point,
+                                            &mut status_to_set,
+                                            &mut track_file_path_text,
+                                            local_track_dirty,
+                                            &mut track_file_command,
+                                            &mut surface_profile_path_text,
+                                            local_surface_profile_dirty,
+                                            &mut surface_profile_command,
+                                        );
+                                    });
+                            },
+                        );
+
+                        ui.add_space(right_window_margin);
+                    },
+                );
+
+                if panel_changes.any() {
+                    refresh_track_cache(&mut cfg.track);
+                    Self::update_project_start_pose_from_track(cfg);
+                    local_track_dirty = true;
+                    if panel_changes.surface_changed {
+                        local_surface_profile_dirty = true;
+                    }
                     invalidate_sim = true;
                 }
-                ui.small("Arraste um ponto no canvas para mover a geometria da linha. Clique em um ponto para selecioná-lo.");
-
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button("Adicionar ponto no final").clicked() {
-                        let new_point = cfg
-                            .track
-                            .centerline
-                            .last()
-                            .copied()
-                            .map(|p| Vec2::new(p.x + 0.25, p.y))
-                            .unwrap_or(Vec2::new(0.0, 0.0));
-                        cfg.track.centerline.push(new_point);
-                        self.selected_track_point = Some(cfg.track.centerline.len() - 1);
-                        invalidate_sim = true;
-                    }
-                    if ui.button("Remover selecionado").clicked() {
-                        if let Some(idx) = self.selected_track_point {
-                            if cfg.track.centerline.len() > 2 && idx < cfg.track.centerline.len() {
-                                cfg.track.centerline.remove(idx);
-                                self.selected_track_point = None;
-                                invalidate_sim = true;
-                            }
-                        }
-                    }
-                    if ui.button("Salvar pista/projeto").clicked() {
-                        save_clicked = true;
-                    }
-                });
-
-                egui::ScrollArea::vertical()
-                    .max_height(260.0)
-                    .show(ui, |ui| {
-                        egui::Grid::new("track_points_grid")
-                            .striped(true)
-                            .num_columns(4)
-                            .show(ui, |ui| {
-                                ui.strong("#");
-                                ui.strong("x [m]");
-                                ui.strong("y [m]");
-                                ui.strong("Selecionar");
-                                ui.end_row();
-                                for (i, point) in cfg.track.centerline.iter_mut().enumerate() {
-                                    ui.label(i.to_string());
-                                    if ui
-                                        .add(egui::DragValue::new(&mut point.x).speed(0.005))
-                                        .changed()
-                                    {
-                                        invalidate_sim = true;
-                                    }
-                                    if ui
-                                        .add(egui::DragValue::new(&mut point.y).speed(0.005))
-                                        .changed()
-                                    {
-                                        invalidate_sim = true;
-                                    }
-                                    if ui
-                                        .selectable_label(
-                                            self.selected_track_point == Some(i),
-                                            "selecionar",
-                                        )
-                                        .clicked()
-                                    {
-                                        self.selected_track_point = Some(i);
-                                    }
-                                    ui.end_row();
-                                }
-                            });
-                    });
             } else {
                 ui.colored_label(
                     egui::Color32::from_rgb(170, 95, 0),
                     "Carregue um projeto para editar a pista.",
                 );
             }
+
+            self.selected_track_point = selected_track_point;
+            self.track_view_zoom = track_view_zoom;
+            self.track_view_pan_m = track_view_pan_m;
+            self.track_file_path_text = track_file_path_text;
+            self.surface_profile_path_text = surface_profile_path_text;
+            self.track_dirty = local_track_dirty;
+            self.surface_profile_dirty = local_surface_profile_dirty;
+
             if invalidate_sim {
                 self.sim_session = None;
                 self.last_sim_sample = None;
             }
-            if save_clicked {
-                self.save_current_project();
+            if let Some(status) = status_to_set {
+                self.set_status(status);
+            }
+
+            match track_file_command {
+                TrackFileCommand::None => {}
+                TrackFileCommand::New => self.create_new_track(),
+                TrackFileCommand::Load => self.load_track_asset(),
+                TrackFileCommand::Save => self.save_track_asset(false),
+                TrackFileCommand::SaveAs => self.save_track_asset(true),
+            }
+
+            match surface_profile_command {
+                SurfaceProfileCommand::None => {}
+                SurfaceProfileCommand::New => self.create_new_surface_profile(),
+                SurfaceProfileCommand::Load => self.load_surface_profile_asset(),
+                SurfaceProfileCommand::Save => self.save_surface_profile_asset(false),
+                SurfaceProfileCommand::SaveAs => self.save_surface_profile_asset(true),
             }
         }
 
@@ -1272,6 +1747,1632 @@ mod gui {
                 ui.label("Carregue um arquivo .rtlog para visualizar a trajetória e a telemetria.");
             }
         }
+
+        fn show_calibration_tools(&mut self, ui: &mut egui::Ui) {
+            ui.heading("Calibração v0.5 — comparação com dados reais");
+            ui.label("Importe um CSV de log real, alinhe pelo tempo e compare trajetória, sensores e velocidade contra a simulação determinística do projeto carregado.");
+            ui.separator();
+
+            ui.horizontal(|ui| {
+                ui.label("Log real CSV");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.real_log_path_text)
+                        .desired_width(f32::INFINITY),
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label("CSV comparação");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.calibration_csv_path_text)
+                        .desired_width(f32::INFINITY),
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label("Relatório TXT");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.calibration_report_path_text)
+                        .desired_width(f32::INFINITY),
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label("Ajuste JSON");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.tuning_output_path_text)
+                        .desired_width(f32::INFINITY),
+                );
+            });
+
+            ui.horizontal(|ui| {
+                if ui.button("Importar/normalizar log real").clicked() {
+                    self.import_real_log_ui();
+                }
+                if ui.button("Comparar simulação vs real").clicked() {
+                    self.compare_real_log_ui();
+                }
+                if ui.button("Ajustar parâmetros").clicked() {
+                    self.tune_real_log_ui();
+                }
+            });
+
+            ui.separator();
+            if let Some(metrics) = &self.last_calibration_metrics {
+                ui.strong("Últimas métricas");
+                egui::Grid::new("calibration_metrics_grid")
+                    .num_columns(2)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.label("Amostras alinhadas");
+                        ui.label(metrics.aligned_samples.to_string());
+                        ui.end_row();
+                        ui.label("Erro trajetória RMS");
+                        ui.label(format!("{:.6} m", metrics.trajectory_error_m.rms));
+                        ui.end_row();
+                        ui.label("Erro yaw RMS");
+                        ui.label(format!("{:.6} rad", metrics.yaw_error_rad.rms));
+                        ui.end_row();
+                        ui.label("Erro velocidade RMS");
+                        ui.label(format!("{:.6} m/s", metrics.speed_error_m_s.rms));
+                        ui.end_row();
+                        ui.label("Erro sensores RMS");
+                        ui.label(format!("{:.3} ADC", metrics.sensor_error_adc.rms));
+                        ui.end_row();
+                        ui.label("Erro linha RMS");
+                        ui.label(format!("{:.6} m", metrics.line_error_m.rms));
+                        ui.end_row();
+                        ui.label("Score");
+                        ui.label(format!("{:.9}", metrics.score));
+                        ui.end_row();
+                    });
+            } else {
+                ui.label("Nenhuma comparação executada ainda.");
+            }
+        }
+    }
+
+    fn edit_track_properties_panel(
+        ui: &mut egui::Ui,
+        track: &mut TrackV2,
+        selected_segment: &mut Option<usize>,
+        status_to_set: &mut Option<String>,
+        track_file_path_text: &mut String,
+        track_dirty: bool,
+        track_file_command: &mut TrackFileCommand,
+        surface_profile_path_text: &mut String,
+        surface_profile_dirty: bool,
+        surface_profile_command: &mut SurfaceProfileCommand,
+    ) -> TrackPanelChanges {
+        let mut changes = TrackPanelChanges::default();
+        let panel_width = ui.available_width();
+
+        egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::same(8.0))
+            .show(ui, |ui| {
+                ui.set_width(panel_width);
+                ui.horizontal(|ui| {
+                    if track_dirty {
+                        ui.strong("Track File *modified");
+                    } else {
+                        ui.strong("Track File");
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add_sized([70.0, 22.0], egui::Button::new("Save As"))
+                            .clicked()
+                        {
+                            let tracks_dir = std::env::current_dir()
+                                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                                .join("Tracks");
+                            if let Some(path) = rfd::FileDialog::new()
+                                .set_title("Save Track JSON")
+                                .set_file_name(json_file_name_from_name(&track.name, "track"))
+                                .add_filter("JSON", &["json"])
+                                .set_directory(&tracks_dir)
+                                .save_file()
+                            {
+                                *track_file_path_text = path.to_string_lossy().replace('\\', "/");
+                                *track_file_command = TrackFileCommand::SaveAs;
+                            }
+                        }
+                        if ui
+                            .add_sized([52.0, 22.0], egui::Button::new("Save"))
+                            .clicked()
+                        {
+                            *track_file_command = TrackFileCommand::Save;
+                        }
+                        if ui
+                            .add_sized([52.0, 22.0], egui::Button::new("Load"))
+                            .clicked()
+                        {
+                            *track_file_command = TrackFileCommand::Load;
+                        }
+                        if ui
+                            .add_sized([48.0, 22.0], egui::Button::new("New"))
+                            .clicked()
+                        {
+                            *track_file_command = TrackFileCommand::New;
+                        }
+                    });
+                });
+                if track_dirty {
+                    ui.small(
+                        egui::RichText::new("Unsaved track changes")
+                            .color(egui::Color32::from_rgb(190, 130, 30)),
+                    );
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.add_sized([42.0, 22.0], egui::Label::new("Path"));
+                    let field_width = (ui.available_width() - 32.0).max(120.0);
+                    ui.add_sized(
+                        [field_width, 22.0],
+                        egui::TextEdit::singleline(track_file_path_text),
+                    );
+                    if ui
+                        .add_sized([26.0, 22.0], egui::Button::new("..."))
+                        .clicked()
+                    {
+                        let tracks_dir = std::env::current_dir()
+                            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                            .join("Tracks");
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title("Open Track JSON")
+                            .set_directory(&tracks_dir)
+                            .add_filter("JSON", &["json"])
+                            .pick_file()
+                        {
+                            *track_file_path_text = path.to_string_lossy().replace('\\', "/");
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add_sized([42.0, 22.0], egui::Label::new("Name"));
+
+                    if ui
+                        .add_sized(
+                            [ui.available_width(), 22.0],
+                            egui::TextEdit::singleline(&mut track.name),
+                        )
+                        .changed()
+                    {
+                        changes.track_changed = true;
+                    }
+                });
+            });
+
+        ui.add_space(8.0);
+        egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::same(8.0))
+            .show(ui, |ui| {
+                ui.set_width(panel_width);
+                ui.strong("Geometry");
+                ui.add_space(6.0);
+                ui.columns(2, |columns| {
+                    let (left, right) = columns.split_at_mut(1);
+                    let area_ui = &mut left[0];
+                    let origin_ui = &mut right[0];
+
+                    area_ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("Area").small().strong());
+                        ui.horizontal(|ui| {
+                            if compact_drag_value_labeled(
+                                ui,
+                                "Width [mm]",
+                                &mut track.area.width_mm,
+                                10.0,
+                                100.0..=100_000.0,
+                                58.0,
+                            ) {
+                                changes.track_changed = true;
+                            }
+                            if compact_drag_value_labeled(
+                                ui,
+                                "Height [mm]",
+                                &mut track.area.height_mm,
+                                10.0,
+                                100.0..=100_000.0,
+                                58.0,
+                            ) {
+                                changes.track_changed = true;
+                            }
+                            if compact_drag_value_labeled(
+                                ui,
+                                "Grid [mm]",
+                                &mut track.area.grid_mm,
+                                10.0,
+                                1.0..=1000.0,
+                                52.0,
+                            ) {
+                                changes.track_changed = true;
+                            }
+                        });
+                    });
+
+                    origin_ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("Origin").small().strong());
+                        ui.horizontal(|ui| {
+                            if compact_drag_value_labeled(
+                                ui,
+                                "X [mm]",
+                                &mut track.origin.x_mm,
+                                1.0,
+                                -100_000.0..=100_000.0,
+                                58.0,
+                            ) {
+                                changes.track_changed = true;
+                            }
+                            if compact_drag_value_labeled(
+                                ui,
+                                "Y [mm]",
+                                &mut track.origin.y_mm,
+                                1.0,
+                                -100_000.0..=100_000.0,
+                                58.0,
+                            ) {
+                                changes.track_changed = true;
+                            }
+                            if compact_drag_value_labeled(
+                                ui,
+                                "Angle [deg]",
+                                &mut track.origin.heading_deg,
+                                0.5,
+                                -360.0..=360.0,
+                                52.0,
+                            ) {
+                                changes.track_changed = true;
+                            }
+                        });
+                    });
+                });
+            });
+
+        ui.add_space(8.0);
+        egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::same(8.0))
+            .show(ui, |ui| {
+                ui.set_width(panel_width);
+                ui.horizontal(|ui| {
+                    ui.strong("Surface Rules");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add_sized([70.0, 22.0], egui::Button::new("Save As"))
+                            .clicked()
+                        {
+                            let surface_dir = std::env::current_dir()
+                                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                                .join("SurfaceProfiles");
+                            if let Some(path) = rfd::FileDialog::new()
+                                .set_title("Save  JSON")
+                                .set_file_name(json_file_name_from_name(
+                                    &track.rules.profile,
+                                    "surface_profile",
+                                ))
+                                .add_filter("JSON", &["json"])
+                                .set_directory(&surface_dir)
+                                .save_file()
+                            {
+                                *surface_profile_path_text =
+                                    path.to_string_lossy().replace('\\', "/");
+                                *surface_profile_command = SurfaceProfileCommand::SaveAs;
+                            }
+                        }
+                        if ui
+                            .add_sized([52.0, 22.0], egui::Button::new("Save"))
+                            .clicked()
+                        {
+                            *surface_profile_command = SurfaceProfileCommand::Save;
+                        }
+                        if ui
+                            .add_sized([52.0, 22.0], egui::Button::new("Load"))
+                            .clicked()
+                        {
+                            *surface_profile_command = SurfaceProfileCommand::Load;
+                        }
+                        if ui
+                            .add_sized([48.0, 22.0], egui::Button::new("New"))
+                            .clicked()
+                        {
+                            *surface_profile_command = SurfaceProfileCommand::New;
+                        }
+                    });
+                });
+                if surface_profile_dirty {
+                    ui.small(
+                        egui::RichText::new("Unsaved surface profile changes")
+                            .color(egui::Color32::from_rgb(190, 130, 30)),
+                    );
+                }
+                ui.add_space(6.0);
+
+                ui.horizontal(|ui| {
+                    ui.add_sized([42.0, 22.0], egui::Label::new("Path"));
+
+                    let field_width = (ui.available_width() - 32.0).max(120.0);
+                    ui.add_sized(
+                        [field_width, 22.0],
+                        egui::TextEdit::singleline(surface_profile_path_text),
+                    );
+
+                    if ui
+                        .add_sized([26.0, 22.0], egui::Button::new("..."))
+                        .clicked()
+                    {
+                        let surface_dir = std::env::current_dir()
+                            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                            .join("SurfaceProfiles");
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title("Open Surface Profile JSON")
+                            .add_filter("JSON", &["json"])
+                            .set_directory(&surface_dir)
+                            .pick_file()
+                        {
+                            *surface_profile_path_text = path.to_string_lossy().replace('\\', "/");
+                        }
+                    }
+                });
+
+                ui.add_space(4.0);
+
+                ui.horizontal(|ui| {
+                    ui.add_sized([42.0, 22.0], egui::Label::new("Name"));
+
+                    if ui
+                        .add_sized(
+                            [ui.available_width(), 22.0],
+                            egui::TextEdit::singleline(&mut track.rules.profile),
+                        )
+                        .changed()
+                    {
+                        changes.surface_changed = true;
+                    }
+                });
+
+                ui.add_space(8.0);
+                let official = 19.0;
+                let mut line_width = track.rules.overrides.line_width_mm.unwrap_or(official);
+                let before_line_width = line_width;
+                let mut default_values_clicked = false;
+                const SURFACE_FIELD_GAP: f32 = 4.0;
+
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.small("Marker rules");
+                        let mut mode = track.rules.mode;
+                        egui::ComboBox::from_id_source("track_rules_mode_right_panel")
+                            .width(70.0)
+                            .selected_text(mode.as_str())
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut mode, TrackRulesMode::Strict, "strict");
+                                ui.selectable_value(&mut mode, TrackRulesMode::Warning, "warning");
+                                ui.selectable_value(&mut mode, TrackRulesMode::Free, "free");
+                            });
+                        if mode != track.rules.mode {
+                            track.rules.mode = mode;
+                            changes.surface_changed = true;
+                        }
+                    });
+
+                    if compact_drag_value_labeled(
+                        ui,
+                        "Line Width",
+                        &mut line_width,
+                        0.1,
+                        1.0..=100.0,
+                        58.0,
+                    ) {
+                        changes.surface_changed = true;
+                    }
+
+                    ui.add_space(SURFACE_FIELD_GAP);
+
+                    if compact_drag_value_labeled(
+                        ui,
+                        "Background Reflec.",
+                        &mut track.surface.base_reflectance,
+                        0.01,
+                        0.0..=1.0,
+                        58.0,
+                    ) {
+                        changes.surface_changed = true;
+                    }
+
+                    ui.add_space(SURFACE_FIELD_GAP);
+
+                    if compact_drag_value_labeled(
+                        ui,
+                        "Line Reflec.",
+                        &mut track.surface.line_reflectance,
+                        0.01,
+                        0.0..=1.0,
+                        58.0,
+                    ) {
+                        changes.surface_changed = true;
+                    }
+
+                    ui.add_space(SURFACE_FIELD_GAP);
+                    ui.vertical(|ui| {
+                        ui.small("");
+                        if ui
+                            .add_sized([72.0, 22.0], egui::Button::new("Default"))
+                            .clicked()
+                        {
+                            default_values_clicked = true;
+                        }
+                    });
+                });
+
+                if default_values_clicked {
+                    track.rules.profile = "robotrace official".to_string();
+                    track.rules.mode = TrackRulesMode::Warning;
+                    track.rules.overrides = Default::default();
+                    track.surface.base_color = "black".to_string();
+                    track.surface.line_color = "white".to_string();
+                    track.surface.base_reflectance = 0.08;
+                    track.surface.line_reflectance = 0.86;
+                    track.surface.surface_mu = 1.20;
+                    track.markings.start_finish.distance_mm = 1000.0;
+                    track.markings.start_finish.margin_mm = 100.0;
+                    changes.track_changed = true;
+                    changes.surface_changed = true;
+                } else if (line_width - before_line_width).abs() > f64::EPSILON {
+                    track.rules.overrides.line_width_mm = Some(line_width);
+                    changes.surface_changed = true;
+                }
+            });
+
+        ui.add_space(8.0);
+        egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::same(8.0))
+            .show(ui, |ui| {
+                ui.set_width(panel_width);
+                ui.strong("Segments");
+                ui.add_space(6.0);
+
+                if track.segments.is_empty() {
+                    *selected_segment = None;
+                } else if selected_segment
+                    .map(|idx| idx >= track.segments.len())
+                    .unwrap_or(true)
+                {
+                    *selected_segment = Some(0);
+                }
+
+                let column_gap = 8.0;
+                let available_width = ui.available_width();
+                let list_width = 216.0;
+                let command_width = (available_width - list_width - column_gap).max(160.0);
+
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(command_width);
+
+                        if track.segments.is_empty() {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(190, 130, 30),
+                                "No segment selected.",
+                            );
+                        } else if edit_selected_segment(ui, track, selected_segment, status_to_set)
+                        {
+                            changes.track_changed = true;
+                        }
+
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("Add").small().strong());
+
+                        let add_button_w = ((ui.available_width() - 8.0) / 3.0).max(54.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_sized([add_button_w, 22.0], egui::Button::new("Straight"))
+                                .clicked()
+                            {
+                                let id = next_segment_id(&track.segments, "R");
+                                track.segments.push(TrackSegment::Straight(StraightSegment {
+                                    id,
+                                    length_mm: 300.0,
+                                }));
+                                *selected_segment = Some(track.segments.len() - 1);
+                                changes.track_changed = true;
+                            }
+                            if ui
+                                .add_sized([add_button_w, 22.0], egui::Button::new("Left Arc"))
+                                .clicked()
+                            {
+                                let id = next_segment_id(&track.segments, "C");
+                                track.segments.push(TrackSegment::Arc(ArcSegment {
+                                    id,
+                                    radius_mm: 300.0,
+                                    sweep_deg: 90.0,
+                                }));
+                                *selected_segment = Some(track.segments.len() - 1);
+                                changes.track_changed = true;
+                            }
+                            if ui
+                                .add_sized([add_button_w, 22.0], egui::Button::new("Right Arc"))
+                                .clicked()
+                            {
+                                let id = next_segment_id(&track.segments, "C");
+                                track.segments.push(TrackSegment::Arc(ArcSegment {
+                                    id,
+                                    radius_mm: 300.0,
+                                    sweep_deg: -90.0,
+                                }));
+                                *selected_segment = Some(track.segments.len() - 1);
+                                changes.track_changed = true;
+                            }
+                        });
+
+                        if ui
+                            .add_sized(
+                                [ui.available_width(), 22.0],
+                                egui::Button::new("Complete Track"),
+                            )
+                            .clicked()
+                        {
+                            match auto_complete_track_with_up_to_two_segments(track) {
+                                Ok(message) => {
+                                    *selected_segment = track.segments.len().checked_sub(1);
+                                    *status_to_set = Some(message);
+                                    changes.track_changed = true;
+                                }
+                                Err(err) => {
+                                    *status_to_set =
+                                        Some(format!("Complete Track not applied: {err}"));
+                                }
+                            }
+                        }
+                    });
+
+                    ui.add_space(column_gap);
+
+                    ui.vertical(|ui| {
+                        ui.set_width(list_width);
+                        ui.label(egui::RichText::new("List").small().strong());
+                        ui.add_space(4.0);
+
+                        if track.segments.is_empty() {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(190, 130, 30),
+                                "No segments yet.",
+                            );
+                        } else {
+                            egui::ScrollArea::vertical()
+                                .id_source("track_editor_segments_scroll")
+                                .max_height(230.0)
+                                .show(ui, |ui| {
+                                    for (idx, segment) in track.segments.iter().enumerate() {
+                                        let selected = *selected_segment == Some(idx);
+                                        if ui
+                                            .selectable_label(selected, segment_summary(segment))
+                                            .clicked()
+                                        {
+                                            *selected_segment = Some(idx);
+                                        }
+                                    }
+                                });
+                        }
+                    });
+                });
+            });
+
+        ui.add_space(8.0);
+        egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::same(8.0))
+            .show(ui, |ui| {
+                ui.set_width(panel_width);
+                ui.strong("Start/Finish Marker");
+                ui.add_space(6.0);
+                if edit_start_finish(ui, track, status_to_set) {
+                    changes.track_changed = true;
+                }
+            });
+
+        ui.add_space(8.0);
+        egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::same(8.0))
+            .show(ui, |ui| {
+                ui.set_width(panel_width);
+                ui.strong("Validation");
+                ui.add_space(6.0);
+                let issues = validate_track(track);
+                let errors = issues
+                    .iter()
+                    .filter(|issue| issue.severity == Severity::Error)
+                    .count();
+                let warnings = issues
+                    .iter()
+                    .filter(|issue| issue.severity == Severity::Warning)
+                    .count();
+                ui.label(format!(
+                    "{errors} errors, {warnings} warnings, {} information",
+                    issues.len().saturating_sub(errors + warnings)
+                ));
+                egui::ScrollArea::vertical()
+                    .id_source("track_editor_validation_scroll")
+                    .max_height(150.0)
+                    .show(ui, |ui| {
+                        if issues.is_empty() {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(30, 130, 60),
+                                "OK — no inconsistencies found.",
+                            );
+                        } else {
+                            for issue in issues {
+                                let color = match issue.severity {
+                                    Severity::Error => egui::Color32::from_rgb(190, 55, 45),
+                                    Severity::Warning => egui::Color32::from_rgb(190, 130, 30),
+                                    Severity::Info => egui::Color32::from_rgb(80, 90, 110),
+                                };
+                                let sev = match issue.severity {
+                                    Severity::Error => "Error",
+                                    Severity::Warning => "Warning",
+                                    Severity::Info => "Info",
+                                };
+                                let seg = issue
+                                    .segment_id
+                                    .map(|segment_id| format!(" [{segment_id}]"))
+                                    .unwrap_or_default();
+                                ui.colored_label(
+                                    color,
+                                    format!("{sev}{seg} — {}: {}", issue.rule_id, issue.message),
+                                );
+                            }
+                        }
+                    });
+            });
+
+        changes
+    }
+
+    #[derive(Debug, Clone)]
+    enum AutoCloseSpec {
+        Straight(f64),
+        Arc { radius_mm: f64, sweep_deg: f64 },
+    }
+
+    #[derive(Debug, Clone)]
+    struct AutoClosePlan {
+        segments: Vec<TrackSegment>,
+        priority: i32,
+        straight_mm: f64,
+        total_arc_mm: f64,
+    }
+
+    fn auto_complete_track_with_up_to_two_segments(track: &mut TrackV2) -> Result<String, String> {
+        if track.segments.is_empty() {
+            return Err("add at least one segment before completing the track".to_string());
+        }
+
+        if track_is_closed(track) {
+            return Ok("Track is already closed.".to_string());
+        }
+
+        let base_len = track.segments.len();
+        let mut best: Option<AutoClosePlan> = None;
+
+        let mut straight_trial = track.clone();
+        if auto_close_with_straight(&mut straight_trial).is_ok() && track_is_closed(&straight_trial)
+        {
+            let added = straight_trial.segments[base_len..].to_vec();
+            consider_auto_close_plan(
+                &mut best,
+                AutoClosePlan {
+                    straight_mm: total_straight_mm(&added),
+                    total_arc_mm: total_arc_mm(&added),
+                    priority: 0,
+                    segments: added,
+                },
+            );
+        }
+
+        let geometry = build_geometry(track);
+        let final_pose = geometry.final_pose;
+        let target = Vec2::new(track.origin.x_mm, track.origin.y_mm);
+        let current = Vec2::new(final_pose.x_mm, final_pose.y_mm);
+        let delta = target - current;
+        let theta = final_pose.heading_deg.to_radians();
+        let forward = Vec2::new(theta.cos(), theta.sin());
+        let left = Vec2::new(-theta.sin(), theta.cos());
+        let delta_forward = delta.dot(forward);
+        let delta_left = delta.dot(left);
+        let heading_delta = normalize_degrees(track.origin.heading_deg - final_pose.heading_deg);
+        let min_arc_radius = resolve_rules(&track.rules).min_arc_radius_mm.max(1.0);
+        let min_straight_len = 0.001;
+
+        add_single_arc_candidate(
+            track,
+            &mut best,
+            heading_delta,
+            delta_forward,
+            delta_left,
+            min_arc_radius,
+        );
+        add_straight_arc_candidate(
+            track,
+            &mut best,
+            heading_delta,
+            delta_forward,
+            delta_left,
+            min_straight_len,
+            min_arc_radius,
+        );
+        add_arc_straight_candidate(
+            track,
+            &mut best,
+            heading_delta,
+            delta_forward,
+            delta_left,
+            min_straight_len,
+            min_arc_radius,
+        );
+        add_two_arc_candidates(
+            track,
+            &mut best,
+            delta,
+            final_pose.heading_deg,
+            heading_delta,
+            min_arc_radius,
+        );
+
+        let Some(plan) = best else {
+            return Err(
+                "could not close with up to two generated segments. Try adding an intermediate straight/arc manually."
+                    .to_string(),
+            );
+        };
+
+        let summary = plan
+            .segments
+            .iter()
+            .map(segment_summary)
+            .collect::<Vec<_>>()
+            .join(" + ");
+        let added_count = plan.segments.len();
+        track.segments.extend(plan.segments);
+        Ok(format!(
+            "Complete Track added {added_count} segment(s): {summary}."
+        ))
+    }
+
+    fn add_single_arc_candidate(
+        track: &TrackV2,
+        best: &mut Option<AutoClosePlan>,
+        heading_delta: f64,
+        delta_forward: f64,
+        delta_left: f64,
+        min_arc_radius: f64,
+    ) {
+        if heading_delta.abs() < 1e-6 {
+            return;
+        }
+        let sign = if heading_delta >= 0.0 { 1.0 } else { -1.0 };
+        let angle = heading_delta.abs().to_radians();
+        let lateral_coeff = sign * (1.0 - angle.cos());
+        let forward_coeff = angle.sin();
+
+        let radius = if forward_coeff.abs() > 1e-9 {
+            delta_forward / forward_coeff
+        } else if lateral_coeff.abs() > 1e-9 && delta_forward.abs() <= 0.5 {
+            delta_left / lateral_coeff
+        } else {
+            return;
+        };
+
+        if !valid_arc_radius(radius, min_arc_radius) {
+            return;
+        }
+        if (radius * lateral_coeff - delta_left).abs() > 0.5 {
+            return;
+        }
+
+        consider_specs(
+            track,
+            best,
+            2,
+            vec![AutoCloseSpec::Arc {
+                radius_mm: radius,
+                sweep_deg: heading_delta,
+            }],
+        );
+    }
+
+    fn add_straight_arc_candidate(
+        track: &TrackV2,
+        best: &mut Option<AutoClosePlan>,
+        heading_delta: f64,
+        delta_forward: f64,
+        delta_left: f64,
+        min_straight_len: f64,
+        min_arc_radius: f64,
+    ) {
+        if heading_delta.abs() < 1e-6 {
+            return;
+        }
+        let sign = if heading_delta >= 0.0 { 1.0 } else { -1.0 };
+        let angle = heading_delta.abs().to_radians();
+        let lateral_coeff = sign * (1.0 - angle.cos());
+        if lateral_coeff.abs() < 1e-9 {
+            return;
+        }
+        let radius = delta_left / lateral_coeff;
+        let length = delta_forward - radius * angle.sin();
+        if !valid_arc_radius(radius, min_arc_radius) || length < min_straight_len {
+            return;
+        }
+
+        consider_specs(
+            track,
+            best,
+            1,
+            vec![
+                AutoCloseSpec::Straight(length),
+                AutoCloseSpec::Arc {
+                    radius_mm: radius,
+                    sweep_deg: heading_delta,
+                },
+            ],
+        );
+    }
+
+    fn add_arc_straight_candidate(
+        track: &TrackV2,
+        best: &mut Option<AutoClosePlan>,
+        heading_delta: f64,
+        delta_forward: f64,
+        delta_left: f64,
+        min_straight_len: f64,
+        min_arc_radius: f64,
+    ) {
+        if heading_delta.abs() < 1e-6 {
+            return;
+        }
+        let sign = if heading_delta >= 0.0 { 1.0 } else { -1.0 };
+        let phi = heading_delta.to_radians();
+        let angle = phi.abs();
+        let det = sign * (1.0 - angle.cos());
+        if det.abs() < 1e-9 {
+            return;
+        }
+
+        let radius = (delta_forward * phi.sin() - delta_left * phi.cos()) / det;
+        let length = (angle.sin() * delta_left - sign * (1.0 - angle.cos()) * delta_forward) / det;
+        if !valid_arc_radius(radius, min_arc_radius) || length < min_straight_len {
+            return;
+        }
+
+        consider_specs(
+            track,
+            best,
+            1,
+            vec![
+                AutoCloseSpec::Arc {
+                    radius_mm: radius,
+                    sweep_deg: heading_delta,
+                },
+                AutoCloseSpec::Straight(length),
+            ],
+        );
+    }
+
+    fn add_two_arc_candidates(
+        track: &TrackV2,
+        best: &mut Option<AutoClosePlan>,
+        delta: Vec2,
+        start_heading_deg: f64,
+        heading_delta: f64,
+        min_arc_radius: f64,
+    ) {
+        let step_deg: f64 = 5.0;
+        let max_abs_sweep: f64 = 330.0;
+
+        for full_turn in -1..=1 {
+            let total_heading_delta = heading_delta + 360.0 * full_turn as f64;
+            let mut sweep1: f64 = -max_abs_sweep;
+
+            while sweep1 <= max_abs_sweep {
+                if sweep1.abs() < 1.0 {
+                    sweep1 += step_deg;
+                    continue;
+                }
+
+                let sweep2 = total_heading_delta - sweep1;
+
+                if sweep2.abs() < 1.0 || sweep2.abs() > max_abs_sweep {
+                    sweep1 += step_deg;
+                    continue;
+                }
+
+                let v1 = arc_delta_for_radius(start_heading_deg, sweep1, 1.0);
+                let v2 = arc_delta_for_radius(start_heading_deg + sweep1, sweep2, 1.0);
+                let det = v1.x * v2.y - v1.y * v2.x;
+                if det.abs() < 1e-9 {
+                    sweep1 += step_deg;
+                    continue;
+                }
+
+                let radius1 = (delta.x * v2.y - delta.y * v2.x) / det;
+                let radius2 = (v1.x * delta.y - v1.y * delta.x) / det;
+                if valid_arc_radius(radius1, min_arc_radius)
+                    && valid_arc_radius(radius2, min_arc_radius)
+                {
+                    consider_specs(
+                        track,
+                        best,
+                        3,
+                        vec![
+                            AutoCloseSpec::Arc {
+                                radius_mm: radius1,
+                                sweep_deg: sweep1,
+                            },
+                            AutoCloseSpec::Arc {
+                                radius_mm: radius2,
+                                sweep_deg: sweep2,
+                            },
+                        ],
+                    );
+                }
+
+                sweep1 += step_deg;
+            }
+        }
+    }
+
+    fn consider_specs(
+        track: &TrackV2,
+        best: &mut Option<AutoClosePlan>,
+        priority: i32,
+        specs: Vec<AutoCloseSpec>,
+    ) {
+        let segments = auto_close_segments_with_ids(track, &specs);
+        let mut trial = track.clone();
+        trial.segments.extend(segments.iter().cloned());
+        if !track_is_closed(&trial) {
+            return;
+        }
+
+        consider_auto_close_plan(
+            best,
+            AutoClosePlan {
+                straight_mm: total_straight_mm(&segments),
+                total_arc_mm: total_arc_mm(&segments),
+                priority,
+                segments,
+            },
+        );
+    }
+
+    fn consider_auto_close_plan(best: &mut Option<AutoClosePlan>, candidate: AutoClosePlan) {
+        let replace = match best {
+            None => true,
+            Some(current) => {
+                candidate.priority < current.priority
+                    || (candidate.priority == current.priority
+                        && candidate.straight_mm > current.straight_mm + 1e-6)
+                    || (candidate.priority == current.priority
+                        && (candidate.straight_mm - current.straight_mm).abs() <= 1e-6
+                        && candidate.segments.len() < current.segments.len())
+                    || (candidate.priority == current.priority
+                        && (candidate.straight_mm - current.straight_mm).abs() <= 1e-6
+                        && candidate.segments.len() == current.segments.len()
+                        && candidate.total_arc_mm < current.total_arc_mm)
+            }
+        };
+        if replace {
+            *best = Some(candidate);
+        }
+    }
+
+    fn auto_close_segments_with_ids(track: &TrackV2, specs: &[AutoCloseSpec]) -> Vec<TrackSegment> {
+        let mut ids = track.segments.clone();
+        let mut segments = Vec::with_capacity(specs.len());
+        for spec in specs {
+            let segment = match *spec {
+                AutoCloseSpec::Straight(length_mm) => TrackSegment::Straight(StraightSegment {
+                    id: next_segment_id(&ids, "R"),
+                    length_mm: length_mm.max(0.001),
+                }),
+                AutoCloseSpec::Arc {
+                    radius_mm,
+                    sweep_deg,
+                } => TrackSegment::Arc(ArcSegment {
+                    id: next_segment_id(&ids, "C"),
+                    radius_mm: radius_mm.abs().max(0.001),
+                    sweep_deg,
+                }),
+            };
+            ids.push(segment.clone());
+            segments.push(segment);
+        }
+        segments
+    }
+
+    fn track_is_closed(track: &TrackV2) -> bool {
+        let closure = build_geometry(track).closure_error;
+        closure.distance_mm <= track.closure.position_tolerance_mm.max(0.5)
+            && closure.heading_error_deg.abs() <= track.closure.heading_tolerance_deg.max(0.1)
+    }
+
+    fn valid_arc_radius(radius_mm: f64, min_arc_radius: f64) -> bool {
+        radius_mm.is_finite() && radius_mm >= min_arc_radius
+    }
+
+    fn total_straight_mm(segments: &[TrackSegment]) -> f64 {
+        segments
+            .iter()
+            .map(|segment| match segment {
+                TrackSegment::Straight(straight) => straight.length_mm.max(0.0),
+                TrackSegment::Arc(_) => 0.0,
+            })
+            .sum()
+    }
+
+    fn total_arc_mm(segments: &[TrackSegment]) -> f64 {
+        segments
+            .iter()
+            .map(|segment| match segment {
+                TrackSegment::Straight(_) => 0.0,
+                TrackSegment::Arc(arc) => arc.radius_mm.max(0.0) * arc.sweep_deg.to_radians().abs(),
+            })
+            .sum()
+    }
+
+    fn arc_delta_for_radius(heading_deg: f64, sweep_deg: f64, radius_mm: f64) -> Vec2 {
+        let theta = heading_deg.to_radians();
+        let forward = Vec2::new(theta.cos(), theta.sin());
+        let left = Vec2::new(-theta.sin(), theta.cos());
+        let sign = if sweep_deg >= 0.0 { 1.0 } else { -1.0 };
+        let angle = sweep_deg.abs().to_radians();
+        forward * (radius_mm * angle.sin()) + left * (sign * radius_mm * (1.0 - angle.cos()))
+    }
+
+    fn normalize_degrees(mut deg: f64) -> f64 {
+        while deg > 180.0 {
+            deg -= 360.0;
+        }
+        while deg <= -180.0 {
+            deg += 360.0;
+        }
+        deg
+    }
+
+    fn edit_selected_segment(
+        ui: &mut egui::Ui,
+        track: &mut TrackV2,
+        selected_segment: &mut Option<usize>,
+        status_to_set: &mut Option<String>,
+    ) -> bool {
+        let Some(idx) = *selected_segment else {
+            return false;
+        };
+        if idx >= track.segments.len() {
+            *selected_segment = track.segments.len().checked_sub(1);
+            return false;
+        }
+
+        let mut changed = false;
+        let mut kind = match &track.segments[idx] {
+            TrackSegment::Straight(_) => 0,
+            TrackSegment::Arc(arc) if arc.sweep_deg >= 0.0 => 1,
+            TrackSegment::Arc(_) => 2,
+        };
+        let current_kind = kind;
+
+        let two_col_w = ((ui.available_width() - 6.0) * 0.5).max(72.0);
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.small("ID");
+                if ui
+                    .add_sized(
+                        [two_col_w, 20.0],
+                        egui::TextEdit::singleline(track.segments[idx].id_mut()),
+                    )
+                    .changed()
+                {
+                    changed = true;
+                }
+            });
+
+            ui.add_space(6.0);
+
+            ui.vertical(|ui| {
+                ui.small("Type");
+                egui::ComboBox::from_id_source("selected_segment_kind")
+                    .width(two_col_w)
+                    .selected_text(match kind {
+                        0 => "Straight",
+                        1 => "Left Arc",
+                        _ => "Right Arc",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut kind, 0, "Straight");
+                        ui.selectable_value(&mut kind, 1, "Left Arc");
+                        ui.selectable_value(&mut kind, 2, "Right Arc");
+                    });
+            });
+        });
+
+        if kind != current_kind {
+            let id = track.segments[idx].id().to_string();
+            let old_len = track.segments[idx].length_mm().max(1.0);
+            track.segments[idx] = match kind {
+                0 => TrackSegment::Straight(StraightSegment {
+                    id,
+                    length_mm: old_len,
+                }),
+                1 => TrackSegment::Arc(ArcSegment {
+                    id,
+                    radius_mm: 300.0,
+                    sweep_deg: 90.0,
+                }),
+                _ => TrackSegment::Arc(ArcSegment {
+                    id,
+                    radius_mm: 300.0,
+                    sweep_deg: -90.0,
+                }),
+            };
+            changed = true;
+        }
+
+        ui.add_space(6.0);
+        let field_w = ((ui.available_width() - 12.0) / 3.0).max(52.0);
+        match &mut track.segments[idx] {
+            TrackSegment::Straight(straight) => {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.small("Length [mm]");
+                        if ui
+                            .add_sized(
+                                [field_w, 20.0],
+                                egui::DragValue::new(&mut straight.length_mm)
+                                    .speed(1.0)
+                                    .clamp_range(0.001..=100_000.0),
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    });
+                    ui.add_space(6.0);
+                    ui.vertical(|ui| {
+                        ui.small("Angle [deg]");
+                        ui.add_sized([field_w, 20.0], egui::Label::new("—"));
+                    });
+                    ui.add_space(6.0);
+                    ui.vertical(|ui| {
+                        ui.small("Arc dir.");
+                        ui.add_sized([field_w, 20.0], egui::Label::new("—"));
+                    });
+                });
+            }
+            TrackSegment::Arc(arc) => {
+                let mut angle_abs = arc.sweep_deg.abs();
+                let mut left = arc.sweep_deg >= 0.0;
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.small("Radius [mm]");
+                        if ui
+                            .add_sized(
+                                [field_w, 20.0],
+                                egui::DragValue::new(&mut arc.radius_mm)
+                                    .speed(1.0)
+                                    .clamp_range(0.001..=100_000.0),
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    });
+                    ui.add_space(6.0);
+                    ui.vertical(|ui| {
+                        ui.small("Angle [deg]");
+                        if ui
+                            .add_sized(
+                                [field_w, 20.0],
+                                egui::DragValue::new(&mut angle_abs)
+                                    .speed(0.5)
+                                    .clamp_range(0.001..=360.0),
+                            )
+                            .changed()
+                        {
+                            arc.sweep_deg = angle_abs.copysign(arc.sweep_deg);
+                            changed = true;
+                        }
+                    });
+                    ui.add_space(6.0);
+                    ui.vertical(|ui| {
+                        ui.small("Arc dir.");
+                        egui::ComboBox::from_id_source("selected_arc_direction")
+                            .width(field_w)
+                            .selected_text(if left { "left" } else { "right" })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut left, true, "left");
+                                ui.selectable_value(&mut left, false, "right");
+                            });
+                    });
+                });
+                if left != (arc.sweep_deg >= 0.0) {
+                    arc.sweep_deg = if left {
+                        arc.sweep_deg.abs()
+                    } else {
+                        -arc.sweep_deg.abs()
+                    };
+                    changed = true;
+                }
+            }
+        }
+
+        ui.add_space(6.0);
+        let button_w = ((ui.available_width() - 6.0) * 0.5).max(72.0);
+        ui.horizontal(|ui| {
+            if ui
+                .add_sized([button_w, 22.0], egui::Button::new("Rename"))
+                .clicked()
+            {
+                let prefix = match &track.segments[idx] {
+                    TrackSegment::Straight(_) => "R",
+                    TrackSegment::Arc(_) => "C",
+                };
+                let mut others = track.segments.clone();
+                others.remove(idx);
+                *track.segments[idx].id_mut() = next_segment_id(&others, prefix);
+                *status_to_set = Some("Segment renamed automatically.".to_string());
+                changed = true;
+            }
+            if ui
+                .add_sized([button_w, 22.0], egui::Button::new("Remove"))
+                .clicked()
+            {
+                track.segments.remove(idx);
+                *selected_segment = if track.segments.is_empty() {
+                    None
+                } else {
+                    Some(idx.min(track.segments.len() - 1))
+                };
+                changed = true;
+            }
+        });
+
+        changed
+    }
+
+    fn edit_start_finish(
+        ui: &mut egui::Ui,
+        track: &mut TrackV2,
+        status_to_set: &mut Option<String>,
+    ) -> bool {
+        let mut changed = false;
+        let panel_width = ui.available_width();
+        let row_gap = 8.0;
+        let straight_w = (panel_width * 0.43).clamp(130.0, 170.0);
+        let number_w = 86.0;
+        let button_w = (panel_width - straight_w - number_w - row_gap * 3.0).clamp(94.0, 140.0);
+
+        let valid_segments = valid_start_finish_segments(track);
+        let valid_current = valid_segments
+            .iter()
+            .any(|segment| segment.id == track.markings.start_finish.segment_id);
+
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.small("Straight segment");
+                if valid_segments.is_empty() {
+                    ui.add_sized([straight_w, 20.0], egui::Label::new("no valid straight"));
+                } else {
+                    let mut selected_id = if valid_current {
+                        track.markings.start_finish.segment_id.clone()
+                    } else {
+                        valid_segments[0].id.clone()
+                    };
+                    egui::ComboBox::from_id_source("start_finish_segment")
+                        .width(straight_w)
+                        .selected_text(if valid_current {
+                            track.markings.start_finish.segment_id.as_str()
+                        } else {
+                            "select straight"
+                        })
+                        .show_ui(ui, |ui| {
+                            for segment in &valid_segments {
+                                ui.selectable_value(
+                                    &mut selected_id,
+                                    segment.id.clone(),
+                                    format!("{} — L={:.1} mm", segment.id, segment.length_mm),
+                                );
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "Straight segment that contains the START and FINISH markers. Only long straight segments are shown.",
+                        );
+                    if selected_id != track.markings.start_finish.segment_id {
+                        track.markings.start_finish.segment_id = selected_id.clone();
+                        if let Some(segment) = valid_segments.iter().find(|s| s.id == selected_id) {
+                            center_start_finish_on_segment(track, segment.length_mm);
+                        }
+                        changed = true;
+                    }
+                }
+            });
+
+            ui.add_space(row_gap);
+
+            let selected_length_for_start = valid_segments
+                .iter()
+                .find(|segment| segment.id == track.markings.start_finish.segment_id)
+                .map(|segment| segment.length_mm);
+            let start_range = if let Some(length_mm) = selected_length_for_start {
+                let max_start = (length_mm - track.markings.start_finish.margin_mm - track.markings.start_finish.distance_mm).max(track.markings.start_finish.margin_mm);
+                track.markings.start_finish.margin_mm..=max_start
+            } else {
+                0.0..=100_000.0
+            };
+            if compact_drag_value_labeled(
+                ui,
+                "Start offset [mm]",
+                &mut track.markings.start_finish.start_s_mm,
+                1.0,
+                start_range,
+                number_w,
+            ) {
+                if let Some(length_mm) = selected_length_for_start {
+                    clamp_start_finish_to_segment(track, length_mm);
+                }
+                changed = true;
+            }
+            ui.add_space(row_gap);
+            ui.vertical(|ui| {
+                ui.small("");
+                if ui
+                    .add_sized([button_w, 20.0], egui::Button::new("Default Values"))
+                    .on_hover_text(
+                        "Aplica valores oficiais: distância START/FINISH = 1000 mm, margem = 100 mm. Também posiciona o robô dentro da área permitida e com Heading 0° apontando para START.",
+                    )
+                    .clicked()
+                {
+                    track.markings.start_finish.distance_mm = 1000.0;
+                    track.markings.start_finish.margin_mm = 100.0;
+                    track.markings.start_finish.robot_start.delta_x_mm = ROBOT_START_MARKER_CLEARANCE_MM;
+                    track.markings.start_finish.robot_start.delta_y_mm = 0.0;
+                    track.markings.start_finish.robot_start.heading_deg = 0.0;
+                    if let Some(length_mm) = selected_length_for_start {
+                        if length_mm + 1e-6 >= start_finish_required_length_mm(&track.markings.start_finish) {
+                            center_start_finish_on_segment(track, length_mm);
+                        } else {
+                            *status_to_set = Some(
+                                "Default START/FINISH distance does not fit in the selected straight."
+                                    .to_string(),
+                            );
+                        }
+                    }
+                    changed = true;
+                }
+            });
+        });
+
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if compact_drag_value_labeled(
+                ui,
+                "Marker distance [mm]",
+                &mut track.markings.start_finish.distance_mm,
+                1.0,
+                1.0..=100_000.0,
+                number_w,
+            ) {
+                changed = true;
+            }
+            ui.add_space(row_gap);
+            if compact_drag_value_labeled(
+                ui,
+                "End margin [mm]",
+                &mut track.markings.start_finish.margin_mm,
+                1.0,
+                0.0..=100_000.0,
+                number_w,
+            ) {
+                changed = true;
+            }
+            ui.add_space(row_gap);
+            ui.vertical(|ui| {
+                ui.small("");
+                if ui
+                    .add_sized(
+                        [
+                            (panel_width - number_w * 2.0 - row_gap * 3.0).max(80.0),
+                            20.0,
+                        ],
+                        egui::Button::new("Center on selected straight"),
+                    )
+                    .on_hover_text("Centraliza a área START/FINISH dentro da reta selecionada.")
+                    .clicked()
+                {
+                    if let Some(length_mm) = valid_segments
+                        .iter()
+                        .find(|segment| segment.id == track.markings.start_finish.segment_id)
+                        .map(|segment| segment.length_mm)
+                    {
+                        center_start_finish_on_segment(track, length_mm);
+                        changed = true;
+                    }
+                }
+            });
+        });
+
+        if valid_segments.is_empty() {
+            ui.colored_label(
+                egui::Color32::from_rgb(190, 55, 45),
+                format!(
+                    "No valid straight. Minimum required: {:.1} mm.",
+                    start_finish_required_length_mm(&track.markings.start_finish)
+                ),
+            );
+        } else if !valid_current {
+            ui.colored_label(
+                egui::Color32::from_rgb(190, 130, 30),
+                "Current straight cannot contain START/FINISH and is not listed as valid.",
+            );
+        }
+
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Robot start pose").small().strong());
+        let robot_field_w = ((panel_width - row_gap * 2.0) / 3.0).clamp(78.0, 116.0);
+        ui.horizontal(|ui| {
+            if compact_drag_value_labeled(
+                ui,
+                "ΔX from START [mm]",
+                &mut track.markings.start_finish.robot_start.delta_x_mm,
+                1.0,
+                -100_000.0..=100_000.0,
+                robot_field_w,
+            ) {
+                changed = true;
+            }
+            ui.add_space(row_gap);
+            if compact_drag_value_labeled(
+                ui,
+                "ΔY from line [mm]",
+                &mut track.markings.start_finish.robot_start.delta_y_mm,
+                1.0,
+                -100_000.0..=100_000.0,
+                robot_field_w,
+            ) {
+                changed = true;
+            }
+            ui.add_space(row_gap);
+            if compact_drag_value_labeled(
+                ui,
+                "Heading [deg]",
+                &mut track.markings.start_finish.robot_start.heading_deg,
+                0.5,
+                -180.0..=180.0,
+                robot_field_w,
+            ) {
+                changed = true;
+            }
+        });
+
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new("Robot exit").small().strong());
+        let mut direction = track.markings.start_finish.exit_direction;
+        egui::ComboBox::from_id_source("start_finish_exit_direction")
+            .width(panel_width)
+            .selected_text(match direction {
+                StartExitDirection::ToIncreasingS => "Goes to the right (+s)",
+                StartExitDirection::ToDecreasingS => "Goes to the left (-s)",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut direction,
+                    StartExitDirection::ToIncreasingS,
+                    "Goes to the right (+s)",
+                );
+                ui.selectable_value(
+                    &mut direction,
+                    StartExitDirection::ToDecreasingS,
+                    "Goes to the left (-s)",
+                );
+            })
+            .response
+            .on_hover_text("Swap which end of the area is START and which is FINISH.");
+        if direction != track.markings.start_finish.exit_direction {
+            track.markings.start_finish.exit_direction = direction;
+            changed = true;
+        }
+
+        if let Some(resolved) = resolve_start_finish_markers(track) {
+            let robot_pose = resolve_robot_start_pose(track);
+            ui.small(format!(
+                "START s={:.1} mm | FINISH s={:.1} mm | START→FINISH heading {:.1}°",
+                resolved.start_local_s_mm, resolved.finish_local_s_mm, resolved.travel_heading_deg
+            ));
+            if let Some(robot_pose) = robot_pose {
+                ui.small(format!(
+                    "Robot starts at x={:.3} m, y={:.3} m, heading={:.1}°.",
+                    robot_pose.x_mm / 1000.0,
+                    robot_pose.y_mm / 1000.0,
+                    robot_pose.heading_deg
+                ));
+            }
+        }
+
+        changed
+    }
+
+    fn compact_drag_value_labeled(
+        ui: &mut egui::Ui,
+        label: &str,
+        value: &mut f64,
+        speed: f64,
+        range: std::ops::RangeInclusive<f64>,
+        width: f32,
+    ) -> bool {
+        let mut changed = false;
+        ui.vertical(|ui| {
+            ui.small(label);
+            if ui
+                .add_sized(
+                    [width, 20.0],
+                    egui::DragValue::new(value).speed(speed).clamp_range(range),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+        });
+        changed
+    }
+
+    fn drag_value_row(
+        ui: &mut egui::Ui,
+        label: &str,
+        value: &mut f64,
+        speed: f64,
+        range: std::ops::RangeInclusive<f64>,
+        width: f32,
+    ) -> bool {
+        ui.label(label);
+        let changed = ui
+            .add_sized(
+                [width, 20.0],
+                egui::DragValue::new(value).speed(speed).clamp_range(range),
+            )
+            .changed();
+        ui.end_row();
+        changed
+    }
+
+    fn drag_value_labeled(
+        ui: &mut egui::Ui,
+        label: &str,
+        value: &mut f64,
+        speed: f64,
+        range: std::ops::RangeInclusive<f64>,
+    ) -> bool {
+        let mut changed = false;
+        ui.vertical(|ui| {
+            ui.small(label);
+            if ui
+                .add(egui::DragValue::new(value).speed(speed).clamp_range(range))
+                .changed()
+            {
+                changed = true;
+            }
+        });
+        changed
+    }
+
+    fn segment_summary(segment: &TrackSegment) -> String {
+        match segment {
+            TrackSegment::Straight(straight) => {
+                format!("Straight {} — L={:.1} mm", straight.id, straight.length_mm)
+            }
+            TrackSegment::Arc(arc) => {
+                format!(
+                    "Arc {} — R={:.1} mm, θ={:.1}°",
+                    arc.id, arc.radius_mm, arc.sweep_deg
+                )
+            }
+        }
     }
 
     impl eframe::App for RTSimApp {
@@ -1289,6 +3390,7 @@ mod gui {
                 AppView::RobotEditor => self.show_robot_editor(ui),
                 AppView::VisualSimulator => self.show_visual_simulator(ui, ctx),
                 AppView::ReplayViewer => self.show_replay_viewer(ui),
+                AppView::CalibrationTools => self.show_calibration_tools(ui),
             });
         }
     }
@@ -1389,7 +3491,7 @@ mod gui {
         let desired = egui::vec2(ui.available_width(), 420.0);
         let (response, painter) = ui.allocate_painter(desired, egui::Sense::click_and_drag());
         let rect = response.rect;
-        painter.rect_filled(rect, 6.0, egui::Color32::from_gray(245));
+        painter.rect_filled(rect, 6.0, egui::Color32::from_rgb(8, 8, 8));
         let bounds = track_bounds(track, None);
         draw_track_geometry(&painter, rect, bounds, track, None, &[]);
 
@@ -1439,12 +3541,75 @@ mod gui {
         robot_pose: Option<Pose2>,
         trail: &[TelemetrySample],
     ) {
-        let desired = egui::vec2(ui.available_width(), 440.0);
-        let (_response, painter) = ui.allocate_painter(desired, egui::Sense::hover());
-        let rect = _response.rect;
-        painter.rect_filled(rect, 6.0, egui::Color32::from_gray(245));
-        let bounds = track_bounds(track, robot_pose.map(|p| Vec2::new(p.x, p.y)));
+        draw_track_view_with_height(ui, track, robot_pose, trail, 440.0);
+    }
+
+    fn draw_track_view_with_height(
+        ui: &mut egui::Ui,
+        track: &TrackConfig,
+        robot_pose: Option<Pose2>,
+        trail: &[TelemetrySample],
+        height: f32,
+    ) {
+        let mut zoom = 1.0;
+        let mut pan_m = Vec2::new(0.0, 0.0);
+        draw_track_view_with_height_zoomable(
+            ui, track, robot_pose, trail, height, &mut zoom, &mut pan_m,
+        );
+    }
+
+    fn draw_track_view_with_height_zoomable(
+        ui: &mut egui::Ui,
+        track: &TrackConfig,
+        robot_pose: Option<Pose2>,
+        trail: &[TelemetrySample],
+        height: f32,
+        zoom: &mut f32,
+        pan_m: &mut Vec2,
+    ) {
+        let desired = egui::vec2(ui.available_width(), height.max(220.0));
+        let (response, painter) = ui.allocate_painter(desired, egui::Sense::click_and_drag());
+        let rect = response.rect;
+        painter.rect_filled(rect, 6.0, egui::Color32::from_rgb(8, 8, 8));
+
+        let base_bounds = track_bounds(track, robot_pose.map(|p| Vec2::new(p.x, p.y)));
+        *zoom = (*zoom).clamp(0.25, 12.0);
+        let mut bounds = viewport_bounds(base_bounds, *zoom, *pan_m);
+
+        if response.hovered() {
+            let scroll_y = ui.input(|i| i.raw_scroll_delta.y);
+            if scroll_y.abs() > 0.0 {
+                let pointer = ui.input(|i| i.pointer.hover_pos()).unwrap_or(rect.center());
+                let before = screen_to_world(rect, bounds, pointer);
+                let factor = (scroll_y * 0.0015).exp();
+                *zoom = (*zoom * factor).clamp(0.25, 12.0);
+                bounds = viewport_bounds(base_bounds, *zoom, *pan_m);
+                let after = screen_to_world(rect, bounds, pointer);
+                pan_m.x += before.x - after.x;
+                pan_m.y += before.y - after.y;
+                bounds = viewport_bounds(base_bounds, *zoom, *pan_m);
+            }
+        }
+
+        if response.dragged() {
+            let delta = ui.input(|i| i.pointer.delta());
+            let scale = world_screen_scale(rect, bounds).max(1e-9);
+            pan_m.x -= delta.x as f64 / scale;
+            pan_m.y += delta.y as f64 / scale;
+            bounds = viewport_bounds(base_bounds, *zoom, *pan_m);
+            ui.ctx().request_repaint();
+        }
+
         draw_track_geometry(&painter, rect, bounds, track, robot_pose, trail);
+
+        let help = "Scroll: zoom | arraste: mover | Fit: reset";
+        painter.text(
+            rect.left_top() + egui::vec2(10.0, 10.0),
+            egui::Align2::LEFT_TOP,
+            help,
+            egui::FontId::proportional(11.0),
+            egui::Color32::from_rgb(110, 110, 110),
+        );
     }
 
     fn draw_replay_path_only(
@@ -1455,7 +3620,7 @@ mod gui {
         let desired = egui::vec2(ui.available_width(), 440.0);
         let (_response, painter) = ui.allocate_painter(desired, egui::Sense::hover());
         let rect = _response.rect;
-        painter.rect_filled(rect, 6.0, egui::Color32::from_gray(245));
+        painter.rect_filled(rect, 6.0, egui::Color32::from_rgb(8, 8, 8));
         let bounds = replay_bounds(trail);
         if trail.len() >= 2 {
             for w in trail.windows(2) {
@@ -1487,19 +3652,104 @@ mod gui {
         robot_pose: Option<Pose2>,
         trail: &[TelemetrySample],
     ) {
+        draw_grid(painter, rect, bounds, track);
         if track.centerline.len() >= 2 {
+            let px_width = world_len_to_screen(rect, bounds, track.line_width_m).max(2.0);
             for w in track.centerline.windows(2) {
                 let a = world_to_screen(rect, bounds, w[0]);
                 let b = world_to_screen(rect, bounds, w[1]);
-                let px_width = world_len_to_screen(rect, bounds, track.line_width_m).max(2.0);
                 painter.line_segment(
                     [a, b],
-                    egui::Stroke::new(px_width, egui::Color32::from_rgb(25, 25, 25)),
+                    egui::Stroke::new(px_width, egui::Color32::from_rgb(245, 245, 245)),
                 );
                 painter.line_segment(
                     [a, b],
-                    egui::Stroke::new(1.0, egui::Color32::from_gray(100)),
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(110, 110, 110)),
                 );
+            }
+        }
+        if let Some(parametric) = &track.parametric {
+            let origin = Vec2::new(
+                parametric.origin.x_mm / 1000.0,
+                parametric.origin.y_mm / 1000.0,
+            );
+            let origin_screen = world_to_screen(rect, bounds, origin);
+            painter.circle_filled(origin_screen, 5.0, egui::Color32::from_rgb(80, 160, 255));
+            let heading = parametric.origin.heading_deg.to_radians();
+            let arrow_end = Vec2::new(
+                origin.x + heading.cos() * 0.12,
+                origin.y + heading.sin() * 0.12,
+            );
+            painter.line_segment(
+                [origin_screen, world_to_screen(rect, bounds, arrow_end)],
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 160, 255)),
+            );
+
+            let geometry = build_geometry(parametric);
+            if let Some(resolved) = resolve_start_finish_markers(parametric) {
+                if let Some(corners) = robot_start_allowed_area_corners(parametric) {
+                    draw_robot_start_allowed_area(painter, rect, bounds, corners);
+                }
+                if let Some(robot_start_pose) = resolve_robot_start_pose(parametric) {
+                    draw_robot_start_pose(painter, rect, bounds, robot_start_pose);
+                }
+                draw_track_marker(
+                    painter,
+                    rect,
+                    bounds,
+                    resolved.start_pose,
+                    "START",
+                    egui::Color32::from_rgb(80, 220, 120),
+                    MarkerSide::Right,
+                    track.line_width_m,
+                );
+                draw_track_marker(
+                    painter,
+                    rect,
+                    bounds,
+                    resolved.finish_pose,
+                    "FINISH",
+                    egui::Color32::from_rgb(255, 200, 70),
+                    MarkerSide::Right,
+                    track.line_width_m,
+                );
+            }
+            if parametric.markings.corner_markers.auto_generate {
+                let reverse = !parametric
+                    .markings
+                    .start_finish
+                    .exit_direction
+                    .is_increasing_s();
+                for seg in &geometry.segment_poses {
+                    if seg.kind == "arc" {
+                        let mut start_pose = seg.start;
+                        let mut end_pose = seg.end;
+                        if reverse {
+                            start_pose.heading_deg += 180.0;
+                            end_pose.heading_deg += 180.0;
+                        }
+                        draw_track_marker(
+                            painter,
+                            rect,
+                            bounds,
+                            start_pose,
+                            "CM",
+                            egui::Color32::from_rgb(120, 200, 255),
+                            MarkerSide::Left,
+                            track.line_width_m,
+                        );
+                        draw_track_marker(
+                            painter,
+                            rect,
+                            bounds,
+                            end_pose,
+                            "CM",
+                            egui::Color32::from_rgb(120, 200, 255),
+                            MarkerSide::Left,
+                            track.line_width_m,
+                        );
+                    }
+                }
             }
         }
         if trail.len() >= 2 {
@@ -1510,13 +3760,164 @@ mod gui {
                 let b = world_to_screen(rect, bounds, Vec2::new(w[1].x_m, w[1].y_m));
                 painter.line_segment(
                     [a, b],
-                    egui::Stroke::new(1.5, egui::Color32::from_rgb(40, 120, 220)),
+                    egui::Stroke::new(1.5, egui::Color32::from_rgb(40, 140, 255)),
                 );
             }
         }
         if let Some(pose) = robot_pose {
             draw_robot(painter, rect, bounds, pose, 0.12, 0.09);
         }
+    }
+
+    fn draw_grid(painter: &egui::Painter, rect: egui::Rect, bounds: Bounds, track: &TrackConfig) {
+        let Some(parametric) = &track.parametric else {
+            return;
+        };
+        let grid_m = (parametric.area.grid_mm / 1000.0).max(0.001);
+        let min_x = (bounds.min_x / grid_m).floor() as i32;
+        let max_x = (bounds.max_x / grid_m).ceil() as i32;
+        let min_y = (bounds.min_y / grid_m).floor() as i32;
+        let max_y = (bounds.max_y / grid_m).ceil() as i32;
+        let stroke = egui::Stroke::new(0.5, egui::Color32::from_rgb(35, 35, 35));
+        for ix in min_x..=max_x {
+            let x = ix as f64 * grid_m;
+            painter.line_segment(
+                [
+                    world_to_screen(rect, bounds, Vec2::new(x, bounds.min_y)),
+                    world_to_screen(rect, bounds, Vec2::new(x, bounds.max_y)),
+                ],
+                stroke,
+            );
+        }
+        for iy in min_y..=max_y {
+            let y = iy as f64 * grid_m;
+            painter.line_segment(
+                [
+                    world_to_screen(rect, bounds, Vec2::new(bounds.min_x, y)),
+                    world_to_screen(rect, bounds, Vec2::new(bounds.max_x, y)),
+                ],
+                stroke,
+            );
+        }
+        let area_rect = [
+            world_to_screen(rect, bounds, Vec2::new(0.0, 0.0)),
+            world_to_screen(
+                rect,
+                bounds,
+                Vec2::new(parametric.area.width_mm / 1000.0, 0.0),
+            ),
+            world_to_screen(
+                rect,
+                bounds,
+                Vec2::new(
+                    parametric.area.width_mm / 1000.0,
+                    parametric.area.height_mm / 1000.0,
+                ),
+            ),
+            world_to_screen(
+                rect,
+                bounds,
+                Vec2::new(0.0, parametric.area.height_mm / 1000.0),
+            ),
+        ];
+        painter.add(egui::Shape::closed_line(
+            area_rect.to_vec(),
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 80, 80)),
+        ));
+    }
+
+    fn draw_robot_start_allowed_area(
+        painter: &egui::Painter,
+        rect: egui::Rect,
+        bounds: Bounds,
+        corners_mm: [Vec2; 4],
+    ) {
+        let points: Vec<egui::Pos2> = corners_mm
+            .iter()
+            .map(|p| world_to_screen(rect, bounds, Vec2::new(p.x / 1000.0, p.y / 1000.0)))
+            .collect();
+        painter.add(egui::Shape::closed_line(
+            points,
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 135, 100)),
+        ));
+    }
+
+    fn draw_robot_start_pose(
+        painter: &egui::Painter,
+        rect: egui::Rect,
+        bounds: Bounds,
+        pose: crate::rtsim_track::TrackPose,
+    ) {
+        let p = Vec2::new(pose.x_mm / 1000.0, pose.y_mm / 1000.0);
+        let theta = pose.heading_deg.to_radians();
+        let forward = Vec2::new(theta.cos(), theta.sin());
+        let left = Vec2::new(-theta.sin(), theta.cos());
+        let half_len = 0.055;
+        let half_w = 0.035;
+        let nose = p + forward * half_len;
+        let rear_left = p - forward * half_len + left * half_w;
+        let rear_right = p - forward * half_len - left * half_w;
+        let shape = vec![
+            world_to_screen(rect, bounds, nose),
+            world_to_screen(rect, bounds, rear_left),
+            world_to_screen(rect, bounds, rear_right),
+        ];
+        painter.add(egui::Shape::closed_line(
+            shape,
+            egui::Stroke::new(2.0, egui::Color32::from_rgb(230, 120, 80)),
+        ));
+        painter.text(
+            world_to_screen(rect, bounds, p) + egui::vec2(6.0, -6.0),
+            egui::Align2::LEFT_BOTTOM,
+            "ROBOT START",
+            egui::FontId::proportional(10.0),
+            egui::Color32::from_rgb(230, 120, 80),
+        );
+    }
+
+    fn draw_track_marker(
+        painter: &egui::Painter,
+        rect: egui::Rect,
+        bounds: Bounds,
+        pose: crate::rtsim_track::TrackPose,
+        label: &str,
+        color: egui::Color32,
+        side: MarkerSide,
+        line_width_m: f64,
+    ) {
+        let p = Vec2::new(pose.x_mm / 1000.0, pose.y_mm / 1000.0);
+        let theta = pose.heading_deg.to_radians();
+        let left_normal = Vec2::new(-theta.sin(), theta.cos());
+        let side_sign = match side {
+            MarkerSide::Left => 1.0,
+            MarkerSide::Right => -1.0,
+            MarkerSide::Center => 0.0,
+        };
+        let lateral_offset_m = side_sign * (line_width_m * 0.5 + 0.04);
+        let center = Vec2::new(
+            p.x + left_normal.x * lateral_offset_m,
+            p.y + left_normal.y * lateral_offset_m,
+        );
+        let half_marker_len_m = 0.02;
+        let a_world = Vec2::new(
+            center.x - left_normal.x * half_marker_len_m,
+            center.y - left_normal.y * half_marker_len_m,
+        );
+        let b_world = Vec2::new(
+            center.x + left_normal.x * half_marker_len_m,
+            center.y + left_normal.y * half_marker_len_m,
+        );
+        let a = world_to_screen(rect, bounds, a_world);
+        let b = world_to_screen(rect, bounds, b_world);
+        let pos = world_to_screen(rect, bounds, center);
+        painter.line_segment([a, b], egui::Stroke::new(3.0, color));
+        painter.text(
+            pos + egui::vec2(6.0, 6.0),
+            egui::Align2::LEFT_TOP,
+            label,
+            egui::FontId::proportional(11.0),
+            color,
+        );
     }
 
     fn draw_robot(
@@ -1675,6 +4076,26 @@ mod gui {
         }
     }
 
+    fn viewport_bounds(base: Bounds, zoom: f32, pan_m: Vec2) -> Bounds {
+        let zoom = (zoom as f64).clamp(0.25, 12.0);
+        let cx = (base.min_x + base.max_x) * 0.5 + pan_m.x;
+        let cy = (base.min_y + base.max_y) * 0.5 + pan_m.y;
+        let half_w = (base.max_x - base.min_x) * 0.5 / zoom;
+        let half_h = (base.max_y - base.min_y) * 0.5 / zoom;
+        Bounds {
+            min_x: cx - half_w,
+            max_x: cx + half_w,
+            min_y: cy - half_h,
+            max_y: cy + half_h,
+        }
+    }
+
+    fn world_screen_scale(rect: egui::Rect, b: Bounds) -> f64 {
+        let sx = rect.width() as f64 / (b.max_x - b.min_x).max(1e-9);
+        let sy = rect.height() as f64 / (b.max_y - b.min_y).max(1e-9);
+        sx.min(sy)
+    }
+
     fn world_to_screen(rect: egui::Rect, b: Bounds, p: Vec2) -> egui::Pos2 {
         let sx = rect.width() as f64 / (b.max_x - b.min_x).max(1e-9);
         let sy = rect.height() as f64 / (b.max_y - b.min_y).max(1e-9);
@@ -1756,7 +4177,89 @@ mod gui {
         }
     }
 
+    fn path_relative_to_project(project_path: &Path, child: &Path) -> PathBuf {
+        if child.is_absolute() {
+            return child.to_path_buf();
+        }
+        let base_dir = project_path.parent().unwrap_or_else(|| Path::new("."));
+        child
+            .strip_prefix(base_dir)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|_| child.to_path_buf())
+    }
+
+    fn resolve_asset_path_text(project_path: Option<&Path>, text: &str) -> PathBuf {
+        let path = PathBuf::from(text.trim());
+        if path.is_absolute() || path.exists() || path.components().count() > 1 {
+            path
+        } else if let Some(project_path) = project_path {
+            project_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(path)
+        } else {
+            path
+        }
+    }
+
+    fn default_surface_profile_path(profile_name: &str) -> PathBuf {
+        Path::new("examples/profiles")
+            .join(format!("{}.json", sanitize_asset_filename(profile_name)))
+    }
+
+    fn sanitize_asset_filename(name: &str) -> String {
+        let mut out = String::new();
+        for ch in name.chars() {
+            if ch.is_ascii_alphanumeric() {
+                out.push(ch.to_ascii_lowercase());
+            } else if ch.is_whitespace() || matches!(ch, '-' | '_' | '.') {
+                if !out.ends_with('_') {
+                    out.push('_');
+                }
+            }
+        }
+        let out = out.trim_matches('_').to_string();
+        if out.is_empty() {
+            "surface_profile".to_string()
+        } else {
+            out
+        }
+    }
+
+    fn save_track_to_file(track: &TrackConfig, path: &Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::write(path, track_json(track)).map_err(|e| e.to_string())
+    }
+
+    fn save_surface_profile_to_file(profile: &SurfaceProfile, path: &Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::write(path, surface_profile_json(profile)).map_err(|e| e.to_string())
+    }
+
     fn save_loaded_config(cfg: &LoadedConfig) -> Result<(), String> {
+        if let Some(track) = &cfg.track.parametric {
+            if track.rules.mode == TrackRulesMode::Strict {
+                let errors: Vec<_> = validate_track(track)
+                    .into_iter()
+                    .filter(|issue| issue.severity == Severity::Error)
+                    .collect();
+                if !errors.is_empty() {
+                    return Err(format!(
+                        "modo strict bloqueou o salvamento: {}",
+                        errors
+                            .iter()
+                            .take(3)
+                            .map(|issue| issue.message.as_str())
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ));
+                }
+            }
+        }
         let base_dir = cfg.project_path.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(base_dir).map_err(|e| e.to_string())?;
         let robot_path = resolve_child_path(&cfg.project_path, &cfg.project.robot_path);
@@ -1786,11 +4289,11 @@ mod gui {
         ));
         out.push_str(&format!(
             "  \"robot\": \"{}\",\n",
-            escape_json(&project.robot_path.display().to_string())
+            escape_json(&RTSimApp::path_text(&project.robot_path))
         ));
         out.push_str(&format!(
             "  \"track\": \"{}\",\n",
-            escape_json(&project.track_path.display().to_string())
+            escape_json(&RTSimApp::path_text(&project.track_path))
         ));
         out.push_str("  \"time\": {\n");
         out.push_str(&format!(
@@ -1983,6 +4486,9 @@ mod gui {
     }
 
     fn track_json(track: &TrackConfig) -> String {
+        if let Some(v2) = &track.parametric {
+            return track_v2_json(v2);
+        }
         let mut out = String::new();
         out.push_str("{\n");
         out.push_str(&format!(
@@ -2020,6 +4526,376 @@ mod gui {
         out
     }
 
+    fn track_v2_json(track: &TrackV2) -> String {
+        let mut out = String::new();
+        out.push_str("{\n");
+        out.push_str(&format!(
+            "  \"track_schema\": \"{}\",\n",
+            escape_json(&track.schema)
+        ));
+        out.push_str(&format!("  \"name\": \"{}\",\n", escape_json(&track.name)));
+        out.push_str(&format!(
+            "  \"units\": \"{}\",\n",
+            escape_json(&track.units)
+        ));
+        out.push_str("  \"area\": {\n");
+        out.push_str(&format!("    \"width_mm\": {:.6},\n", track.area.width_mm));
+        out.push_str(&format!(
+            "    \"height_mm\": {:.6},\n",
+            track.area.height_mm
+        ));
+        out.push_str(&format!("    \"grid_mm\": {:.6}\n", track.area.grid_mm));
+        out.push_str("  },\n");
+        out.push_str("  \"origin\": {\n");
+        out.push_str(&format!("    \"x_mm\": {:.6},\n", track.origin.x_mm));
+        out.push_str(&format!("    \"y_mm\": {:.6},\n", track.origin.y_mm));
+        out.push_str(&format!(
+            "    \"heading_deg\": {:.9}\n",
+            track.origin.heading_deg
+        ));
+        out.push_str("  },\n");
+        out.push_str("  \"rules\": {\n");
+        out.push_str(&format!(
+            "    \"profile\": \"{}\",\n",
+            escape_json(&track.rules.profile)
+        ));
+        out.push_str(&format!(
+            "    \"mode\": \"{}\",\n",
+            track.rules.mode.as_str()
+        ));
+        out.push_str("    \"overrides\": {");
+        let mut fields = Vec::new();
+        push_opt_num(
+            &mut fields,
+            "line_width_mm",
+            track.rules.overrides.line_width_mm,
+        );
+        push_opt_num(
+            &mut fields,
+            "max_total_length_mm",
+            track.rules.overrides.max_total_length_mm,
+        );
+        push_opt_num(
+            &mut fields,
+            "min_arc_radius_mm",
+            track.rules.overrides.min_arc_radius_mm,
+        );
+        push_opt_num(
+            &mut fields,
+            "min_distance_between_curvature_changes_mm",
+            track
+                .rules
+                .overrides
+                .min_distance_between_curvature_changes_mm,
+        );
+        push_opt_num(
+            &mut fields,
+            "intersection_angle_deg",
+            track.rules.overrides.intersection_angle_deg,
+        );
+        push_opt_num(
+            &mut fields,
+            "intersection_angle_tolerance_deg",
+            track.rules.overrides.intersection_angle_tolerance_deg,
+        );
+        push_opt_num(
+            &mut fields,
+            "min_straight_around_intersection_mm",
+            track.rules.overrides.min_straight_around_intersection_mm,
+        );
+        push_opt_bool(
+            &mut fields,
+            "start_finish_must_be_on_straight",
+            track.rules.overrides.start_finish_must_be_on_straight,
+        );
+        push_opt_num(
+            &mut fields,
+            "min_straight_around_start_finish_mm",
+            track.rules.overrides.min_straight_around_start_finish_mm,
+        );
+        push_opt_num(
+            &mut fields,
+            "start_goal_distance_mm",
+            track.rules.overrides.start_goal_distance_mm,
+        );
+        push_opt_num(
+            &mut fields,
+            "start_goal_area_half_width_mm",
+            track.rules.overrides.start_goal_area_half_width_mm,
+        );
+        push_opt_num(
+            &mut fields,
+            "min_table_edge_clearance_mm",
+            track.rules.overrides.min_table_edge_clearance_mm,
+        );
+        push_opt_num(
+            &mut fields,
+            "max_slope_deg",
+            track.rules.overrides.max_slope_deg,
+        );
+        if fields.is_empty() {
+            out.push_str("}\n");
+        } else {
+            out.push('\n');
+            for (i, field) in fields.iter().enumerate() {
+                let suffix = if i + 1 == fields.len() { "" } else { "," };
+                out.push_str(&format!("      {}{}\n", field, suffix));
+            }
+            out.push_str("    }\n");
+        }
+        out.push_str("  },\n");
+        out.push_str("  \"surface\": {\n");
+        out.push_str(&format!(
+            "    \"base_color\": \"{}\",\n",
+            escape_json(&track.surface.base_color)
+        ));
+        out.push_str(&format!(
+            "    \"line_color\": \"{}\",\n",
+            escape_json(&track.surface.line_color)
+        ));
+        out.push_str(&format!(
+            "    \"base_reflectance\": {:.9},\n",
+            track.surface.base_reflectance
+        ));
+        out.push_str(&format!(
+            "    \"line_reflectance\": {:.9},\n",
+            track.surface.line_reflectance
+        ));
+        out.push_str(&format!(
+            "    \"surface_mu\": {:.9}\n",
+            track.surface.surface_mu
+        ));
+        out.push_str("  },\n");
+        out.push_str("  \"segments\": [\n");
+        for (i, segment) in track.segments.iter().enumerate() {
+            let suffix = if i + 1 == track.segments.len() {
+                ""
+            } else {
+                ","
+            };
+            match segment {
+                TrackSegment::Straight(straight) => {
+                    out.push_str(&format!(
+                        "    {{ \"id\": \"{}\", \"kind\": \"straight\", \"length_mm\": {:.6} }}{}\n",
+                        escape_json(&straight.id), straight.length_mm, suffix
+                    ));
+                }
+                TrackSegment::Arc(arc) => {
+                    out.push_str(&format!(
+                        "    {{ \"id\": \"{}\", \"kind\": \"arc\", \"radius_mm\": {:.6}, \"sweep_deg\": {:.9} }}{}\n",
+                        escape_json(&arc.id), arc.radius_mm, arc.sweep_deg, suffix
+                    ));
+                }
+            }
+        }
+        out.push_str("  ],\n");
+        out.push_str("  \"closure\": {\n");
+        out.push_str(&format!("    \"required\": {},\n", track.closure.required));
+        out.push_str(&format!(
+            "    \"position_tolerance_mm\": {:.6},\n",
+            track.closure.position_tolerance_mm
+        ));
+        out.push_str(&format!(
+            "    \"heading_tolerance_deg\": {:.9}\n",
+            track.closure.heading_tolerance_deg
+        ));
+        out.push_str("  },\n");
+        out.push_str("  \"markings\": {\n");
+        out.push_str("    \"start_finish\": {\n");
+        out.push_str(&format!(
+            "      \"enabled\": {},\n",
+            track.markings.start_finish.enabled
+        ));
+        out.push_str(&format!(
+            "      \"segment_id\": \"{}\",\n",
+            escape_json(&track.markings.start_finish.segment_id)
+        ));
+        out.push_str(&format!(
+            "      \"start_s_mm\": {:.6},\n",
+            track.markings.start_finish.start_s_mm
+        ));
+        out.push_str(&format!(
+            "      \"distance_mm\": {:.6},\n",
+            track.markings.start_finish.distance_mm
+        ));
+        out.push_str(&format!(
+            "      \"margin_mm\": {:.6},\n",
+            track.markings.start_finish.margin_mm
+        ));
+        out.push_str(&format!(
+            "      \"exit_direction\": \"{}\",\n",
+            track.markings.start_finish.exit_direction.as_str()
+        ));
+        out.push_str("      \"robot_start\": {\n");
+        out.push_str(&format!(
+            "        \"delta_x_mm\": {:.6},\n",
+            track.markings.start_finish.robot_start.delta_x_mm
+        ));
+        out.push_str(&format!(
+            "        \"delta_y_mm\": {:.6},\n",
+            track.markings.start_finish.robot_start.delta_y_mm
+        ));
+        out.push_str(&format!(
+            "        \"heading_deg\": {:.9}\n",
+            track.markings.start_finish.robot_start.heading_deg
+        ));
+        out.push_str("      }\n");
+        out.push_str("    },\n");
+        out.push_str("    \"corner_markers\": {\n");
+        out.push_str(&format!(
+            "      \"auto_generate\": {}\n",
+            track.markings.corner_markers.auto_generate
+        ));
+        out.push_str("    }\n");
+        out.push_str("  }\n");
+        out.push_str("}\n");
+        out
+    }
+
+    fn surface_profile_json(profile: &SurfaceProfile) -> String {
+        let mut out = String::new();
+        out.push_str("{\n");
+        out.push_str(&format!(
+            "  \"surface_profile_schema\": \"{}\",\n",
+            escape_json(&profile.schema)
+        ));
+        out.push_str(&format!(
+            "  \"name\": \"{}\",\n",
+            escape_json(&profile.name)
+        ));
+        if let Some(line_width_mm) = profile.line_width_mm {
+            out.push_str(&format!("  \"line_width_mm\": {:.9},\n", line_width_mm));
+        }
+        out.push_str(&format!(
+            "  \"background_reflectance\": {:.9},\n",
+            profile.background_reflectance
+        ));
+        out.push_str(&format!(
+            "  \"line_reflectance\": {:.9},\n",
+            profile.line_reflectance
+        ));
+        out.push_str(&format!(
+            "  \"marker_profile\": \"{}\",\n",
+            escape_json(&profile.marker_profile)
+        ));
+        out.push_str("  \"rules\": {\n");
+        out.push_str(&format!(
+            "    \"mode\": \"{}\",\n",
+            profile.rules_mode.as_str()
+        ));
+        out.push_str("    \"overrides\": {");
+        let mut fields = Vec::new();
+        push_opt_num(
+            &mut fields,
+            "line_width_mm",
+            profile.overrides.line_width_mm,
+        );
+        push_opt_num(
+            &mut fields,
+            "max_total_length_mm",
+            profile.overrides.max_total_length_mm,
+        );
+        push_opt_num(
+            &mut fields,
+            "min_arc_radius_mm",
+            profile.overrides.min_arc_radius_mm,
+        );
+        push_opt_num(
+            &mut fields,
+            "min_distance_between_curvature_changes_mm",
+            profile.overrides.min_distance_between_curvature_changes_mm,
+        );
+        push_opt_num(
+            &mut fields,
+            "intersection_angle_deg",
+            profile.overrides.intersection_angle_deg,
+        );
+        push_opt_num(
+            &mut fields,
+            "intersection_angle_tolerance_deg",
+            profile.overrides.intersection_angle_tolerance_deg,
+        );
+        push_opt_num(
+            &mut fields,
+            "min_straight_around_intersection_mm",
+            profile.overrides.min_straight_around_intersection_mm,
+        );
+        push_opt_bool(
+            &mut fields,
+            "start_finish_must_be_on_straight",
+            profile.overrides.start_finish_must_be_on_straight,
+        );
+        push_opt_num(
+            &mut fields,
+            "min_straight_around_start_finish_mm",
+            profile.overrides.min_straight_around_start_finish_mm,
+        );
+        push_opt_num(
+            &mut fields,
+            "start_goal_distance_mm",
+            profile.overrides.start_goal_distance_mm,
+        );
+        push_opt_num(
+            &mut fields,
+            "start_goal_area_half_width_mm",
+            profile.overrides.start_goal_area_half_width_mm,
+        );
+        push_opt_num(
+            &mut fields,
+            "min_table_edge_clearance_mm",
+            profile.overrides.min_table_edge_clearance_mm,
+        );
+        push_opt_num(
+            &mut fields,
+            "max_slope_deg",
+            profile.overrides.max_slope_deg,
+        );
+        if fields.is_empty() {
+            out.push_str("}\n");
+        } else {
+            out.push('\n');
+            for (i, field) in fields.iter().enumerate() {
+                let suffix = if i + 1 == fields.len() { "" } else { "," };
+                out.push_str(&format!("      {}{}\n", field, suffix));
+            }
+            out.push_str("    }\n");
+        }
+        out.push_str("  },\n");
+        out.push_str("  \"surface\": {\n");
+        out.push_str(&format!(
+            "    \"base_color\": \"{}\",\n",
+            escape_json(&profile.base_color)
+        ));
+        out.push_str(&format!(
+            "    \"line_color\": \"{}\",\n",
+            escape_json(&profile.line_color)
+        ));
+        out.push_str(&format!(
+            "    \"base_reflectance\": {:.9},\n",
+            profile.background_reflectance
+        ));
+        out.push_str(&format!(
+            "    \"line_reflectance\": {:.9},\n",
+            profile.line_reflectance
+        ));
+        out.push_str(&format!("    \"surface_mu\": {:.9}\n", profile.surface_mu));
+        out.push_str("  }\n");
+        out.push_str("}\n");
+        out
+    }
+
+    fn push_opt_num(fields: &mut Vec<String>, key: &str, value: Option<f64>) {
+        if let Some(value) = value {
+            fields.push(format!("\"{}\": {:.9}", key, value));
+        }
+    }
+
+    fn push_opt_bool(fields: &mut Vec<String>, key: &str, value: Option<bool>) {
+        if let Some(value) = value {
+            fields.push(format!("\"{}\": {}", key, value));
+        }
+    }
+
     fn curve_json(curve: &[(f64, f64)]) -> String {
         let mut out = String::from("[");
         for (idx, (x, y)) in curve.iter().enumerate() {
@@ -2044,18 +4920,18 @@ mod gui {
     fn default_loaded_config(project_path: PathBuf) -> LoadedConfig {
         let project = ProjectConfig {
             schema: "rtsim-project-v1".to_string(),
-            name: "novo-projeto-v0.4".to_string(),
+            name: "novo-projeto-v0.5".to_string(),
             robot_path: PathBuf::from("robot.json"),
             track_path: PathBuf::from("track.json"),
             time: TimeConfig::default(),
             duration_s: 10.0,
-            start_pose: Pose2::new(0.0, 0.035, 0.0),
+            start_pose: Pose2::new(0.7, 0.5, 0.0),
             csv_output: Some(PathBuf::from("resultado.csv")),
             replay_output: Some(PathBuf::from("resultado.rtlog")),
         };
         let robot = RobotConfig {
             schema: "rtsim-robot-v4".to_string(),
-            name: "Simple N20 PID Robot v0.4".to_string(),
+            name: "Simple N20 PID Robot v0.5".to_string(),
             chassis: ChassisConfig {
                 mass_kg: 0.180,
                 inertia_kg_m2: 0.00045,
@@ -2148,28 +5024,7 @@ mod gui {
                 downforce_pwm: 0.0,
             },
         };
-        let track = TrackConfig {
-            schema: "rtsim-track-v1".to_string(),
-            name: "Simple Vector S-Curve".to_string(),
-            model: "VectorTrack".to_string(),
-            line_width_m: 0.019,
-            base_reflectance: 0.86,
-            line_reflectance: 0.08,
-            surface_mu: 1.20,
-            centerline: vec![
-                Vec2::new(0.0, 0.00),
-                Vec2::new(0.5, 0.00),
-                Vec2::new(1.0, 0.04),
-                Vec2::new(1.5, 0.10),
-                Vec2::new(2.0, 0.10),
-                Vec2::new(2.5, 0.03),
-                Vec2::new(3.0, -0.04),
-                Vec2::new(3.5, -0.08),
-                Vec2::new(4.0, -0.02),
-                Vec2::new(4.5, 0.05),
-                Vec2::new(5.0, 0.00),
-            ],
-        };
+        let track = TrackConfig::from_parametric(TrackV2::default_closed_rectangle());
         LoadedConfig {
             project_path,
             project,
@@ -2195,5 +5050,5 @@ pub use gui::run_app;
 
 #[cfg(not(feature = "gui"))]
 pub fn run_app() -> Result<(), String> {
-    Err("a interface gráfica v0.4 foi adicionada atrás da feature 'gui'. Compile com: cargo run --features gui -- ui".to_string())
+    Err("a interface gráfica v0.5 foi adicionada atrás da feature 'gui'. Compile com: cargo run --features gui -- ui".to_string())
 }

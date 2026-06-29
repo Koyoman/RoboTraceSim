@@ -1,14 +1,17 @@
-# Robotrace Sim v0.4 — Interface única
+# Robotrace Sim v0.08 — Comparação com dados reais
 
-Simulador de robôs seguidores de linha em Rust com núcleo físico determinístico fixed-step, execução por terminal e primeira interface gráfica integrada em `egui/eframe`.
+Simulador de robôs seguidores de linha em Rust com núcleo físico determinístico fixed-step, execução por terminal, interface gráfica `egui/eframe` e ferramentas de comparação entre simulação e robô real.
 
-A v0.4 preserva os recursos das versões anteriores e adiciona uma aplicação única com:
+A v0.08 preserva os recursos das versões anteriores e adiciona:
 
-- Home
-- Editor de pista
-- Editor de robô
-- Simulador visual
-- Replay viewer
+- Importação/normalização de log real em CSV.
+- Comparação simulação vs robô real.
+- Erro de trajetória.
+- Erro de sensores.
+- Erro de velocidade.
+- Relatório de métricas.
+- Ajuste grosso de parâmetros por busca determinística.
+- Tela de calibração integrada à interface única.
 
 A UI não substitui o núcleo de simulação: ela apenas configura, visualiza e aciona comandos. O core continua podendo rodar de forma automatizada por linha de comando.
 
@@ -60,6 +63,43 @@ cargo run --release -- benchmark examples/basic/projeto.rtsim --duration 10s --p
 cargo run --release -- export examples/basic/resultado.rtlog --format csv --output examples/basic/resultado_exportado.csv
 ```
 
+## Importar log real
+
+O importador aceita CSV com `t_us`, `time_us`, `t_s`, `time_s`, `t_ms` ou `time_ms`, o tempo é normalizado para iniciar em 0 µs, além de colunas opcionais como `x_m`, `y_m`, `yaw_rad`, `vx_body_m_s`, `speed_m_s`, `line_position_m`, `line_error_m` e `sensor_00_adc` até `sensor_NN_adc`.
+
+```bash
+cargo run --release -- import-log examples/basic/real_log_demo.csv --output examples/basic/real_log_normalizado.csv
+```
+
+## Comparar simulação vs robô real
+
+```bash
+cargo run --release -- compare examples/basic/projeto.rtsim --real examples/basic/real_log_demo.csv --output examples/basic/comparacao_v05.csv --report examples/basic/comparacao_v05.txt
+```
+
+A comparação alinha os dados pelo tempo e calcula:
+
+- RMS, média absoluta e máximo do erro de trajetória.
+- RMS, média absoluta e máximo do erro de yaw.
+- RMS, média absoluta e máximo do erro de velocidade.
+- RMS, média absoluta e máximo do erro de sensores ADC.
+- RMS, média absoluta e máximo do erro de linha.
+- Score normalizado para calibração.
+
+## Ajustar parâmetros
+
+```bash
+cargo run --release -- tune examples/basic/projeto.rtsim --real examples/basic/real_log_demo.csv --output examples/basic/ajuste_v05.json
+```
+
+O ajuste da v0.5 faz uma busca grossa determinística sobre:
+
+- `tire.mu_longitudinal`
+- escala de torque de stall dos motores esquerdo/direito
+- escala de corrente de stall correspondente
+
+Ele não sobrescreve automaticamente o `robot.json`; em vez disso, gera um JSON com os melhores valores e métricas para revisão.
+
 ## Recursos já implementados
 
 ### Base v0.1
@@ -109,12 +149,22 @@ cargo run --release -- export examples/basic/resultado.rtlog --format csv --outp
 - Simulador visual com play/pause/step e painel de telemetria.
 - Replay viewer com carregamento `.rtlog`, slider temporal, trajetória e exportação CSV.
 
+### Comparação com dados reais v0.5
+
+- `src/calibration.rs` com importação de CSV real, alinhamento temporal e métricas.
+- Comando `import-log` para normalizar logs reais.
+- Comando `compare` para executar a simulação e comparar contra o log real.
+- Comando `tune`/`calibrate` para ajuste grosso de parâmetros.
+- Tela `Calibração v0.5` dentro da interface única.
+- Arquivo de exemplo `examples/basic/real_log_demo.csv`.
+- Relatórios em CSV, TXT e JSON.
+
 ## Formato do projeto `.rtsim`
 
 ```json
 {
   "rtsim_schema": "rtsim-project-v1",
-  "name": "basic-v0.4-demo",
+  "name": "basic-v0.5-demo",
   "robot": "robot.json",
   "track": "track.json",
   "time": {
@@ -141,7 +191,8 @@ cargo run --release -- export examples/basic/resultado.rtlog --format csv --outp
 
 - A física continua determinística e desacoplada da UI.
 - A UI usa `egui::Painter` para renderização inicial, conforme a especificação.
-- O parser JSON próprio foi mantido para preservar a base sem `serde`, mas a serialização manual da UI já salva os arquivos principais.
+- O parser JSON próprio foi mantido para preservar a base sem `serde`.
+- O ajuste de parâmetros da v0.5 é propositalmente simples e revisável; modelos mais avançados podem adicionar otimização multiobjetivo, bounds configuráveis e exportação direta do `robot.json`.
 - O comando `batch` ainda permanece como próximo passo.
 
 ## Limitação conhecida deste pacote

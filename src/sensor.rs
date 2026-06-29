@@ -52,7 +52,7 @@ impl SensorModel for SimpleLineSensor {
         };
         let base = track.base_reflectance();
         let line = track.line_reflectance();
-        let denom = (base - line).abs().max(1e-9);
+        let contrast = (line - base).abs().max(1e-9);
 
         let mut adc = Vec::with_capacity(count);
         let mut weighted_sum = 0.0;
@@ -68,9 +68,13 @@ impl SensorModel for SimpleLineSensor {
                     + self.cfg.offset
                     + self.rng.gaussian(self.cfg.reflectance_noise_std),
             );
-            let white_level = clamp01((noisy_reflectance - line) / denom);
-            let line_signal = 1.0 - white_level;
-            let adc_float = white_level * max_adc + self.rng.gaussian(self.cfg.adc_noise_lsb);
+            let reflectance_level = clamp01(noisy_reflectance);
+            let line_signal = if line >= base {
+                clamp01((noisy_reflectance - base) / contrast)
+            } else {
+                clamp01((base - noisy_reflectance) / contrast)
+            };
+            let adc_float = reflectance_level * max_adc + self.rng.gaussian(self.cfg.adc_noise_lsb);
             let value = clamp(adc_float.round(), 0.0, max_adc) as u32;
             adc.push(value);
             weighted_sum += y_local * line_signal;

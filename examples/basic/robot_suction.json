@@ -1,6 +1,6 @@
 {
   "robot_schema": "rtsim-robot-v3",
-  "name": "Simple N20 PID Robot v0.3 SuctionDownforce",
+  "name": "Simple N20 PID Robot v0.08 SuctionDownforce",
   "chassis": {
     "model": "RigidBody2DChassis",
     "mass_g": 180,

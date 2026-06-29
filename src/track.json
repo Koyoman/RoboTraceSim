@@ -1,0 +1,96 @@
+{
+  "track_schema": "rtsim-track-v2",
+  "name": "Track Geometry Foundation Demo",
+  "units": "mm",
+  "area": {
+    "width_mm": 3000.0,
+    "height_mm": 2000.0,
+    "grid_mm": 100.0
+  },
+  "origin": {
+    "x_mm": 500.0,
+    "y_mm": 500.0,
+    "heading_deg": 0.0
+  },
+  "rules": {
+    "profile": "robotrace official",
+    "mode": "warning",
+    "overrides": {}
+  },
+  "surface": {
+    "base_color": "black",
+    "line_color": "white",
+    "base_reflectance": 0.08,
+    "line_reflectance": 0.86,
+    "surface_mu": 1.2
+  },
+  "segments": [
+    {
+      "id": "R1",
+      "kind": "straight",
+      "length_mm": 1200.0
+    },
+    {
+      "id": "C1",
+      "kind": "arc",
+      "radius_mm": 300.0,
+      "sweep_deg": 90.0
+    },
+    {
+      "id": "R2",
+      "kind": "straight",
+      "length_mm": 600.0
+    },
+    {
+      "id": "C2",
+      "kind": "arc",
+      "radius_mm": 300.0,
+      "sweep_deg": 90.0
+    },
+    {
+      "id": "R3",
+      "kind": "straight",
+      "length_mm": 1200.0
+    },
+    {
+      "id": "C3",
+      "kind": "arc",
+      "radius_mm": 300.0,
+      "sweep_deg": 90.0
+    },
+    {
+      "id": "R4",
+      "kind": "straight",
+      "length_mm": 600.0
+    },
+    {
+      "id": "C4",
+      "kind": "arc",
+      "radius_mm": 300.0,
+      "sweep_deg": 90.0
+    }
+  ],
+  "closure": {
+    "required": true,
+    "position_tolerance_mm": 0.5,
+    "heading_tolerance_deg": 0.1
+  },
+  "markings": {
+    "start_finish": {
+      "enabled": true,
+      "segment_id": "R1",
+      "start_s_mm": 100.0,
+      "distance_mm": 1000.0,
+      "margin_mm": 100.0,
+      "exit_direction": "to_increasing_s",
+      "robot_start": {
+        "delta_x_mm": 125.0,
+        "delta_y_mm": 0.0,
+        "heading_deg": 0.0
+      }
+    },
+    "corner_markers": {
+      "auto_generate": true
+    }
+  }
+}

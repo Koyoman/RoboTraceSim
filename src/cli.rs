@@ -1,3 +1,7 @@
+use crate::calibration::{
+    compare_project_with_real, import_real_log, print_metrics, tune_project_against_real,
+    write_comparison_csv, write_comparison_report, write_normalized_real_log, write_tuning_report,
+};
 use crate::config::load_project;
 use crate::replay::export_replay_to_csv;
 use crate::sim::{run_simulation, RunOptions, RunSummary};
@@ -13,8 +17,11 @@ pub fn run_cli(args: Vec<String>) -> Result<(), String> {
         "run" => run_command(&args[2..]),
         "benchmark" => benchmark_command(&args[2..]),
         "export" => export_command(&args[2..]),
+        "import-log" => import_log_command(&args[2..]),
+        "compare" => compare_command(&args[2..]),
+        "tune" | "calibrate" => tune_command(&args[2..]),
         "batch" => {
-            Err("batch is planned after v0.4; use repeated 'run' commands for now".to_string())
+            Err("batch is planned after v0.08; use repeated 'run' commands for now".to_string())
         }
         "help" | "--help" | "-h" => {
             print_help();
@@ -227,7 +234,7 @@ fn export_command(args: &[String]) -> Result<(), String> {
     }
 
     if !format.eq_ignore_ascii_case("csv") {
-        return Err("v0.4 export supports only --format csv".to_string());
+        return Err("v0.08 export supports only --format csv".to_string());
     }
     let input = input.ok_or_else(|| "missing replay input. Example: robotrace-sim export resultado.rtlog --format csv --output resultado.csv".to_string())?;
     let output = output.unwrap_or_else(|| default_export_path(&input));
@@ -278,6 +285,236 @@ fn assign_output_path(
     }
 }
 
+fn import_log_command(args: &[String]) -> Result<(), String> {
+    let mut input: Option<PathBuf> = None;
+    let mut output: Option<PathBuf> = None;
+
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--output" | "-o" => {
+                i += 1;
+                output = Some(PathBuf::from(
+                    args.get(i)
+                        .ok_or_else(|| "--output needs a file path".to_string())?,
+                ));
+            }
+            flag if flag.starts_with("--output=") => {
+                output = Some(PathBuf::from(flag.trim_start_matches("--output=")));
+            }
+            "--help" | "-h" => {
+                print_import_log_help();
+                return Ok(());
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown import-log option '{value}'"))
+            }
+            value => {
+                if input.is_some() {
+                    return Err(format!("unexpected positional argument '{value}'"));
+                }
+                input = Some(PathBuf::from(value));
+            }
+        }
+        i += 1;
+    }
+
+    let input = input.ok_or_else(|| "missing real CSV log. Example: robotrace-sim import-log real.csv --output real_normalized.csv".to_string())?;
+    let output = output.unwrap_or_else(|| {
+        let mut out = input.clone();
+        out.set_extension("normalized.csv");
+        out
+    });
+    let real = import_real_log(&input)?;
+    write_normalized_real_log(&real, &output)
+        .map_err(|e| format!("failed to write {}: {e}", output.display()))?;
+    println!(
+        "imported {} real samples from {}",
+        real.samples.len(),
+        input.display()
+    );
+    println!("normalized CSV: {}", output.display());
+    println!("detected sensors: {}", real.sensor_count);
+    Ok(())
+}
+
+fn compare_command(args: &[String]) -> Result<(), String> {
+    let mut project: Option<PathBuf> = None;
+    let mut real_path: Option<PathBuf> = None;
+    let mut output_csv: Option<PathBuf> = None;
+    let mut report_path: Option<PathBuf> = None;
+    let mut duration_us: Option<u64> = None;
+
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--real" | "--real-log" => {
+                i += 1;
+                real_path = Some(PathBuf::from(
+                    args.get(i)
+                        .ok_or_else(|| "--real needs a CSV path".to_string())?,
+                ));
+            }
+            flag if flag.starts_with("--real=") => {
+                real_path = Some(PathBuf::from(flag.trim_start_matches("--real=")));
+            }
+            "--duration" => {
+                i += 1;
+                duration_us = Some(parse_duration_us(
+                    args.get(i)
+                        .ok_or_else(|| "--duration needs a value".to_string())?,
+                )?);
+            }
+            flag if flag.starts_with("--duration=") => {
+                duration_us = Some(parse_duration_us(flag.trim_start_matches("--duration="))?);
+            }
+            "--output" | "--csv" | "-o" => {
+                i += 1;
+                output_csv = Some(PathBuf::from(
+                    args.get(i)
+                        .ok_or_else(|| "--output needs a file path".to_string())?,
+                ));
+            }
+            flag if flag.starts_with("--output=") => {
+                output_csv = Some(PathBuf::from(flag.trim_start_matches("--output=")));
+            }
+            flag if flag.starts_with("--csv=") => {
+                output_csv = Some(PathBuf::from(flag.trim_start_matches("--csv=")));
+            }
+            "--report" => {
+                i += 1;
+                report_path = Some(PathBuf::from(
+                    args.get(i)
+                        .ok_or_else(|| "--report needs a file path".to_string())?,
+                ));
+            }
+            flag if flag.starts_with("--report=") => {
+                report_path = Some(PathBuf::from(flag.trim_start_matches("--report=")));
+            }
+            "--help" | "-h" => {
+                print_compare_help();
+                return Ok(());
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown compare option '{value}'"))
+            }
+            value => {
+                if project.is_some() {
+                    return Err(format!("unexpected positional argument '{value}'"));
+                }
+                project = Some(PathBuf::from(value));
+            }
+        }
+        i += 1;
+    }
+
+    let project = project.ok_or_else(|| {
+        "missing project file. Example: robotrace-sim compare projeto.rtsim --real real.csv"
+            .to_string()
+    })?;
+    let real_path = real_path.ok_or_else(|| "missing --real <real.csv>".to_string())?;
+    let cfg = load_project(&project).map_err(|e| e.to_string())?;
+    let real = import_real_log(&real_path)?;
+    let report = compare_project_with_real(cfg, &real, duration_us)?;
+
+    println!("Robotrace Sim v0.08 comparison");
+    println!("real log: {}", real.source);
+    print_metrics(&report.metrics);
+
+    if let Some(path) = output_csv {
+        write_comparison_csv(&report, &path)
+            .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+        println!("comparison CSV: {}", path.display());
+    }
+    if let Some(path) = report_path {
+        write_comparison_report(&report, &path)
+            .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+        println!("comparison report: {}", path.display());
+    }
+    Ok(())
+}
+
+fn tune_command(args: &[String]) -> Result<(), String> {
+    let mut project: Option<PathBuf> = None;
+    let mut real_path: Option<PathBuf> = None;
+    let mut output: Option<PathBuf> = None;
+    let mut duration_us: Option<u64> = None;
+
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--real" | "--real-log" => {
+                i += 1;
+                real_path = Some(PathBuf::from(
+                    args.get(i)
+                        .ok_or_else(|| "--real needs a CSV path".to_string())?,
+                ));
+            }
+            flag if flag.starts_with("--real=") => {
+                real_path = Some(PathBuf::from(flag.trim_start_matches("--real=")));
+            }
+            "--duration" => {
+                i += 1;
+                duration_us = Some(parse_duration_us(
+                    args.get(i)
+                        .ok_or_else(|| "--duration needs a value".to_string())?,
+                )?);
+            }
+            flag if flag.starts_with("--duration=") => {
+                duration_us = Some(parse_duration_us(flag.trim_start_matches("--duration="))?);
+            }
+            "--output" | "-o" => {
+                i += 1;
+                output = Some(PathBuf::from(
+                    args.get(i)
+                        .ok_or_else(|| "--output needs a file path".to_string())?,
+                ));
+            }
+            flag if flag.starts_with("--output=") => {
+                output = Some(PathBuf::from(flag.trim_start_matches("--output=")));
+            }
+            "--help" | "-h" => {
+                print_tune_help();
+                return Ok(());
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown tune option '{value}'"))
+            }
+            value => {
+                if project.is_some() {
+                    return Err(format!("unexpected positional argument '{value}'"));
+                }
+                project = Some(PathBuf::from(value));
+            }
+        }
+        i += 1;
+    }
+
+    let project = project.ok_or_else(|| "missing project file. Example: robotrace-sim tune projeto.rtsim --real real.csv --output ajuste.json".to_string())?;
+    let real_path = real_path.ok_or_else(|| "missing --real <real.csv>".to_string())?;
+    let output = output.unwrap_or_else(|| PathBuf::from("calibration_result.json"));
+    let cfg = load_project(&project).map_err(|e| e.to_string())?;
+    let real = import_real_log(&real_path)?;
+    let report = tune_project_against_real(cfg, &real, duration_us)?;
+    write_tuning_report(&report, &output)
+        .map_err(|e| format!("failed to write {}: {e}", output.display()))?;
+
+    println!("Robotrace Sim v0.08 parameter tuning");
+    println!("evaluated candidates: {}", report.evaluated_candidates);
+    println!("baseline score: {:.9}", report.baseline.score);
+    println!("best score:     {:.9}", report.best.metrics.score);
+    println!(
+        "best tire.mu_longitudinal: {:.6}",
+        report.best.mu_longitudinal
+    );
+    println!(
+        "best motor torque scale:   {:.6}",
+        report.best.stall_torque_scale
+    );
+    println!("tuning JSON: {}", output.display());
+    Ok(())
+}
+
 fn default_export_path(input: &Path) -> PathBuf {
     let mut out = input.to_path_buf();
     out.set_extension("csv");
@@ -285,7 +522,7 @@ fn default_export_path(input: &Path) -> PathBuf {
 }
 
 fn print_run_summary(summary: &RunSummary) {
-    println!("Robotrace Sim v0.4 headless run complete");
+    println!("Robotrace Sim v0.08 headless run complete");
     println!("project: {}", summary.project_name);
     println!("robot:   {}", summary.robot_name);
     println!("track:   {}", summary.track_name);
@@ -306,7 +543,7 @@ fn print_run_summary(summary: &RunSummary) {
 }
 
 fn print_benchmark_summary(summary: &RunSummary) {
-    println!("Robotrace Sim v0.4 benchmark");
+    println!("Robotrace Sim v0.08 benchmark");
     println!("project:          {}", summary.project_name);
     println!("simulated time:   {:.6} s", summary.simulated_time_s);
     println!("steps:            {}", summary.steps);
@@ -316,16 +553,19 @@ fn print_benchmark_summary(summary: &RunSummary) {
 }
 
 fn print_help() {
-    println!("Robotrace Sim v0.4");
+    println!("Robotrace Sim v0.08");
     println!();
     println!("USAGE:");
-    println!("  robotrace-sim                         # abre a interface única v0.4");
-    println!("  robotrace-sim ui                      # abre a interface única v0.4");
+    println!("  robotrace-sim                         # abre a interface única v0.08");
+    println!("  robotrace-sim ui                      # abre a interface única v0.08");
     println!("  robotrace-sim run <projeto.rtsim> [--headless] [--duration 10s] [--csv out.csv] [--replay out.rtlog]");
     println!("  robotrace-sim benchmark <projeto.rtsim> [--duration 10s] [--physics-dt-us 500]");
     println!("  robotrace-sim export <resultado.rtlog> --format csv [--output resultado.csv]");
+    println!("  robotrace-sim import-log <real.csv> [--output real_normalized.csv]");
+    println!("  robotrace-sim compare <projeto.rtsim> --real real.csv [--output comparacao.csv] [--report comparacao.txt]");
+    println!("  robotrace-sim tune <projeto.rtsim> --real real.csv [--output ajuste.json]");
     println!();
-    println!("v0.4 adds a unified egui/eframe interface with Home, track editor, robot editor, visual simulator and replay viewer while preserving the deterministic CLI core.");
+    println!("v0.08 adds real-log import, simulation-vs-real comparison, trajectory/sensor/speed error metrics and coarse parameter tuning.");
 }
 
 fn print_run_help() {
@@ -338,6 +578,20 @@ fn print_benchmark_help() {
 
 fn print_export_help() {
     println!("USAGE: robotrace-sim export <resultado.rtlog> --format csv --output resultado.csv");
+}
+
+fn print_import_log_help() {
+    println!("USAGE: robotrace-sim import-log <real.csv> --output real_normalized.csv");
+    println!("Accepted time columns: t_us, time_us, t_s, time_s, t_ms, time_ms.");
+}
+
+fn print_compare_help() {
+    println!("USAGE: robotrace-sim compare <projeto.rtsim> --real real.csv --output comparacao.csv --report comparacao.txt");
+}
+
+fn print_tune_help() {
+    println!("USAGE: robotrace-sim tune <projeto.rtsim> --real real.csv --output ajuste.json");
+    println!("The v0.08 tuner evaluates a deterministic coarse grid over tire friction and motor stall torque.");
 }
 
 #[cfg(test)]

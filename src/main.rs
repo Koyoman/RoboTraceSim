@@ -1,4 +1,5 @@
 mod battery;
+mod calibration;
 mod cli;
 mod config;
 mod controller;
@@ -10,6 +11,7 @@ mod motor;
 mod normal_force;
 mod replay;
 mod rng;
+mod rtsim_track;
 mod sensor;
 mod sim;
 mod telemetry;

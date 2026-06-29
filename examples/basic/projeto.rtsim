@@ -1,6 +1,6 @@
 {
   "rtsim_schema": "rtsim-project-v1",
-  "name": "basic-v0.4-interface-demo",
+  "name": "basic-v0.08-track-geometry-demo",
   "robot": "robot.json",
   "track": "track.json",
   "time": {
@@ -13,12 +13,8 @@
     "render_period_us": 16667
   },
   "simulation": {
-    "duration_s": 10.0,
-    "start_pose_m": [
-      0.0,
-      0.035,
-      0.0
-    ]
+    "duration_s": 10.000000000,
+    "start_pose_m": [0.727000000, 0.246000000, 3.141592654]
   },
   "log": {
     "csv": "resultado.csv",

@@ -65,6 +65,7 @@ mod tests {
             line_reflectance: 0.1,
             surface_mu: 1.0,
             centerline: vec![Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.0)],
+            parametric: None,
         });
         assert!((track.reflectance_at(Vec2::new(0.5, 0.0)) - 0.1).abs() < 1e-12);
         assert!((track.reflectance_at(Vec2::new(0.5, 0.02)) - 0.9).abs() < 1e-12);

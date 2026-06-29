@@ -1,215 +1,132 @@
 {
-  "robot_schema": "rtsim-robot-v4",
-  "name": "Simple N20 PID Robot v0.4 FanDownforce",
+  "robot_schema": "rtsim-robot-v5",
+  "name": "Simple N20 PID Robot v0.08 FanDownforce",
   "chassis": {
     "model": "RigidBody2DChassis",
-    "mass_g": 180,
-    "inertia_kg_m2": 0.00045,
-    "center_of_mass_mm": [
-      0,
-      0
-    ],
-    "length_mm": 120,
-    "width_mm": 90
+    "mass_g": 180.000000,
+    "inertia_kg_m2": 0.000450000000,
+    "center_of_mass_mm": [0.000000, 0.000000],
+    "length_mm": 120.000000,
+    "width_mm": 90.000000
   },
   "normal_force": {
     "model": "FanDownforce",
-    "default_pwm": 0.75,
-    "speed_sensitivity": 0.0,
+    "default_pwm": 0.750000000,
+    "position_mm": [0.000000, 0.000000],
+    "max_force_n": 0.000000000,
+    "max_current_a": 0.000000000,
+    "response_time_s": 0.000000000,
+    "chamber_area_m2": 0.000000000,
+    "max_delta_pressure_pa": 0.000000000,
+    "leakage_factor": 0.000000000,
+    "speed_sensitivity": 0.000000000,
+    "force_curve": [],
     "fans": [
       {
-        "position_mm": [
-          38,
-          28
-        ],
-        "max_force_n": 0.55,
-        "max_current_a": 0.75,
-        "nominal_voltage_v": 7.4,
-        "response_time_s": 0.03,
-        "force_curve": [
-          [
-            0.0,
-            0.0
-          ],
-          [
-            0.35,
-            0.07
-          ],
-          [
-            0.6,
-            0.22
-          ],
-          [
-            0.8,
-            0.38
-          ],
-          [
-            1.0,
-            0.55
-          ]
-        ]
+        "position_mm": [38.000000, 28.000000],
+        "max_force_n": 0.550000000,
+        "max_current_a": 0.750000000,
+        "nominal_voltage_v": 7.400000000,
+        "response_time_s": 0.030000000,
+        "pwm_scale": 1.000000000,
+        "pwm": 1.000000000,
+        "force_curve": [[0.000000000, 0.000000000], [0.350000000, 0.070000000], [0.600000000, 0.220000000], [0.800000000, 0.380000000], [1.000000000, 0.550000000]]
       },
       {
-        "position_mm": [
-          38,
-          -28
-        ],
-        "max_force_n": 0.55,
-        "max_current_a": 0.75,
-        "nominal_voltage_v": 7.4,
-        "response_time_s": 0.03,
-        "force_curve": [
-          [
-            0.0,
-            0.0
-          ],
-          [
-            0.35,
-            0.07
-          ],
-          [
-            0.6,
-            0.22
-          ],
-          [
-            0.8,
-            0.38
-          ],
-          [
-            1.0,
-            0.55
-          ]
-        ]
+        "position_mm": [38.000000, -28.000000],
+        "max_force_n": 0.550000000,
+        "max_current_a": 0.750000000,
+        "nominal_voltage_v": 7.400000000,
+        "response_time_s": 0.030000000,
+        "pwm_scale": 1.000000000,
+        "pwm": 1.000000000,
+        "force_curve": [[0.000000000, 0.000000000], [0.350000000, 0.070000000], [0.600000000, 0.220000000], [0.800000000, 0.380000000], [1.000000000, 0.550000000]]
       },
       {
-        "position_mm": [
-          -38,
-          28
-        ],
-        "max_force_n": 0.5,
-        "max_current_a": 0.7,
-        "nominal_voltage_v": 7.4,
-        "response_time_s": 0.035,
-        "force_curve": [
-          [
-            0.0,
-            0.0
-          ],
-          [
-            0.35,
-            0.06
-          ],
-          [
-            0.6,
-            0.2
-          ],
-          [
-            0.8,
-            0.35
-          ],
-          [
-            1.0,
-            0.5
-          ]
-        ]
+        "position_mm": [-38.000000, 28.000000],
+        "max_force_n": 0.500000000,
+        "max_current_a": 0.700000000,
+        "nominal_voltage_v": 7.400000000,
+        "response_time_s": 0.035000000,
+        "pwm_scale": 1.000000000,
+        "pwm": 1.000000000,
+        "force_curve": [[0.000000000, 0.000000000], [0.350000000, 0.060000000], [0.600000000, 0.200000000], [0.800000000, 0.350000000], [1.000000000, 0.500000000]]
       },
       {
-        "position_mm": [
-          -38,
-          -28
-        ],
-        "max_force_n": 0.5,
-        "max_current_a": 0.7,
-        "nominal_voltage_v": 7.4,
-        "response_time_s": 0.035,
-        "force_curve": [
-          [
-            0.0,
-            0.0
-          ],
-          [
-            0.35,
-            0.06
-          ],
-          [
-            0.6,
-            0.2
-          ],
-          [
-            0.8,
-            0.35
-          ],
-          [
-            1.0,
-            0.5
-          ]
-        ]
+        "position_mm": [-38.000000, -28.000000],
+        "max_force_n": 0.500000000,
+        "max_current_a": 0.700000000,
+        "nominal_voltage_v": 7.400000000,
+        "response_time_s": 0.035000000,
+        "pwm_scale": 1.000000000,
+        "pwm": 1.000000000,
+        "force_curve": [[0.000000000, 0.000000000], [0.350000000, 0.060000000], [0.600000000, 0.200000000], [0.800000000, 0.350000000], [1.000000000, 0.500000000]]
       }
     ]
   },
   "drivetrain": {
     "type": "DifferentialDrive4Wheel",
-    "wheel_radius_mm": 10,
-    "wheel_width_mm": 10,
-    "track_width_mm": 82,
-    "wheelbase_mm": 84,
-    "wheel_inertia_g_cm2": 1.0
+    "wheel_radius_mm": 10.000000,
+    "wheel_width_mm": 10.000000,
+    "track_width_mm": 82.000000,
+    "wheelbase_mm": 84.000000,
+    "wheel_inertia_g_cm2": 1.000000000
   },
   "tire": {
     "model": "SlipRatioWheel",
-    "mu_longitudinal": 1.2,
-    "mu_lateral": 1.0,
-    "rolling_resistance": 0.015,
-    "slip_velocity_epsilon_m_s": 0.05
+    "mu_longitudinal": 1.200000000,
+    "mu_lateral": 1.000000000,
+    "rolling_resistance": 0.015000000,
+    "slip_velocity_epsilon_m_s": 0.050000000
   },
   "motors": {
     "left": {
       "model": "DcMotorSimple",
-      "gear_ratio": 30,
-      "efficiency": 0.75,
-      "no_load_rpm": 1800,
-      "stall_torque_mnm": 5.0,
-      "stall_current_a": 1.6
+      "gear_ratio": 30.000000000,
+      "efficiency": 0.750000000,
+      "no_load_rpm": 1800.000000000,
+      "stall_torque_mnm": 5.000000000,
+      "stall_current_a": 1.600000000
     },
     "right": {
       "model": "DcMotorSimple",
-      "gear_ratio": 30,
-      "efficiency": 0.75,
-      "no_load_rpm": 1800,
-      "stall_torque_mnm": 5.0,
-      "stall_current_a": 1.6
+      "gear_ratio": 30.000000000,
+      "efficiency": 0.750000000,
+      "no_load_rpm": 1800.000000000,
+      "stall_torque_mnm": 5.000000000,
+      "stall_current_a": 1.600000000
     }
   },
   "driver": {
     "model": "PwmHBridge",
-    "pwm_frequency_hz": 20000,
+    "pwm_frequency_hz": 20000.000000,
     "mode": "brake",
-    "voltage_drop_v": 0.2,
+    "voltage_drop_v": 0.200000000,
     "pwm_resolution_bits": 10,
-    "command_deadband": 0.001,
-    "current_limit_a": 3.0
+    "command_deadband": 0.001000000,
+    "current_limit_a": 3.000000000
   },
   "battery": {
     "model": "VoltageSagBattery",
-    "nominal_voltage_v": 7.4,
-    "full_voltage_v": 7.4,
-    "empty_voltage_v": 6.4,
+    "nominal_voltage_v": 7.400000000,
+    "full_voltage_v": 7.400000000,
+    "empty_voltage_v": 6.400000000,
     "cells": 2,
-    "capacity_mah": 300,
-    "internal_resistance_ohm": 0.08,
-    "initial_soc": 1.0,
-    "current_limit_a": 60.0
+    "capacity_mah": 300.000000000,
+    "internal_resistance_ohm": 0.080000000,
+    "initial_soc": 1.000000000,
+    "current_limit_a": 60.000000000
   },
   "line_sensor": {
     "model": "NoisyAdcSensor",
     "count": 16,
-    "width_mm": 72,
-    "forward_offset_mm": 55,
+    "width_mm": 72.000000,
+    "forward_offset_mm": 55.000000,
     "adc_bits": 12,
-    "gain": 1.0,
-    "offset": 0.0,
-    "reflectance_noise_std": 0.01,
-    "adc_noise_lsb": 1.0,
+    "gain": 1.000000000,
+    "offset": 0.000000000,
+    "reflectance_noise_std": 0.010000000,
+    "adc_noise_lsb": 1.000000000,
     "seed": 1371
   },
   "encoder": {
@@ -220,19 +137,19 @@
   },
   "gyro": {
     "model": "NoisyGyro",
-    "noise_std_rad_s": 0.01,
-    "bias_rad_s": 0.0,
-    "saturation_rad_s": 34.9,
+    "noise_std_rad_s": 0.010000000,
+    "bias_rad_s": 0.000000000,
+    "saturation_rad_s": 34.900000000,
     "seed": 2467
   },
   "controller": {
     "model": "BuiltInPid",
-    "kp": 13.0,
-    "ki": 0.0,
-    "kd": 0.035,
-    "base_pwm": 0.34,
-    "max_pwm": 0.9,
-    "target_position_mm": 0.0,
-    "downforce_pwm": 0.75
+    "kp": 13.000000000,
+    "ki": 0.000000000,
+    "kd": 0.035000000,
+    "base_pwm": 0.340000000,
+    "max_pwm": 0.900000000,
+    "target_position_mm": 0.000000000,
+    "downforce_pwm": 0.750000000
   }
 }

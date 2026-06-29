@@ -1,0 +1,19 @@
+{
+  "surface_profile_schema": "rtsim-surface-profile-v1",
+  "name": "robotrace official",
+  "line_width_mm": 19.000000000,
+  "background_reflectance": 0.080000000,
+  "line_reflectance": 0.860000000,
+  "marker_profile": "robotrace official",
+  "rules": {
+    "mode": "warning",
+    "overrides": {}
+  },
+  "surface": {
+    "base_color": "black",
+    "line_color": "white",
+    "base_reflectance": 0.080000000,
+    "line_reflectance": 0.860000000,
+    "surface_mu": 1.200000000
+  }
+}

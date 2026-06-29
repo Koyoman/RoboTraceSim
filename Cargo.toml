@@ -1,8 +1,8 @@
 [package]
 name = "robotrace-sim"
-version = "0.4.0"
+version = "0.6.0"
 edition = "2021"
-description = "Robotrace Sim v0.4 with unified egui interface, visual simulator and replay viewer"
+description = "Robotrace Sim v0.08 with parametric closed track geometry and validation"
 license = "MIT"
 
 [features]
@@ -11,3 +11,4 @@ gui = ["dep:eframe"]
 
 [dependencies]
 eframe = { version = "0.27", optional = true }
+rfd = "0.17.2"
