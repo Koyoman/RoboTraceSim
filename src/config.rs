@@ -120,10 +120,79 @@ pub struct RobotConfig {
     pub motor_right: MotorConfig,
     pub driver: DriverConfig,
     pub battery: BatteryConfig,
-    pub line_sensor: LineSensorConfig,
+    pub sensors: Vec<RobotSensorInstance>,
+    pub line_validity_areas: Vec<RobotLineValidityArea>,
     pub encoder: EncoderConfig,
     pub gyro: GyroConfig,
     pub controller: PidConfig,
+}
+
+/// Rectangle attached to the robot that may overlap the course line.
+/// A robot remains valid while at least one enabled rectangle overlaps the line.
+#[derive(Debug, Clone)]
+pub struct RobotLineValidityArea {
+    pub name: String,
+    pub position_m: Vec2,
+    pub length_m: f64,
+    pub width_m: f64,
+    pub angle_deg: f64,
+    pub enabled: bool,
+}
+
+impl RobotLineValidityArea {
+    pub fn overlaps_line_segment(
+        &self,
+        robot_pose: Pose2,
+        line_start_m: Vec2,
+        line_end_m: Vec2,
+        line_width_m: f64,
+    ) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        let to_area_local = |point: Vec2| {
+            let dx = point.x - robot_pose.x;
+            let dy = point.y - robot_pose.y;
+            let robot_c = robot_pose.yaw.cos();
+            let robot_s = robot_pose.yaw.sin();
+            let robot_x = dx * robot_c + dy * robot_s;
+            let robot_y = -dx * robot_s + dy * robot_c;
+            let area_x = robot_x - self.position_m.x;
+            let area_y = robot_y - self.position_m.y;
+            let angle = self.angle_deg.to_radians();
+            let (s, c) = angle.sin_cos();
+            Vec2::new(area_x * c + area_y * s, -area_x * s + area_y * c)
+        };
+        let start = to_area_local(line_start_m);
+        let end = to_area_local(line_end_m);
+        let line_radius = line_width_m.max(0.0) * 0.5;
+        let half_x = self.length_m.max(0.0) * 0.5 + line_radius;
+        let half_y = self.width_m.max(0.0) * 0.5 + line_radius;
+        segment_intersects_axis_aligned_rect(start, end, half_x, half_y)
+    }
+}
+
+fn segment_intersects_axis_aligned_rect(start: Vec2, end: Vec2, half_x: f64, half_y: f64) -> bool {
+    let delta = end - start;
+    let mut t_min: f64 = 0.0;
+    let mut t_max: f64 = 1.0;
+    for (origin, direction, half_extent) in [(start.x, delta.x, half_x), (start.y, delta.y, half_y)]
+    {
+        if direction.abs() < 1e-12 {
+            if origin < -half_extent || origin > half_extent {
+                return false;
+            }
+            continue;
+        }
+        let t1 = (-half_extent - origin) / direction;
+        let t2 = (half_extent - origin) / direction;
+        t_min = t_min.max(t1.min(t2));
+        t_max = t_max.min(t1.max(t2));
+        if t_min > t_max {
+            return false;
+        }
+    }
+    true
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -147,18 +216,26 @@ pub struct DrivetrainConfig {
 #[derive(Debug, Clone)]
 pub struct FanConfig {
     pub position_m: Vec2,
+    pub visual_radius_m: f64,
+    pub action_radius_m: f64,
     pub max_force_n: f64,
     pub max_current_a: f64,
     pub nominal_voltage_v: f64,
+    pub nominal_current_a: f64,
+    pub power_w: f64,
+    pub min_pwm: f64,
+    pub max_pwm: f64,
     pub response_time_s: f64,
     pub pwm_scale: f64,
     pub enabled_pwm: f64,
+    pub curve_model: FanCurveModel,
     pub force_curve: Vec<(f64, f64)>,
 }
 
 #[derive(Debug, Clone)]
 pub struct NormalForceConfig {
     pub model: String,
+    pub model_kind: DownforceModel,
     pub command_pwm_default: f64,
     pub position_m: Vec2,
     pub max_force_n: f64,
@@ -217,7 +294,6 @@ pub struct BatteryConfig {
 
 #[derive(Debug, Clone)]
 pub struct LineSensorConfig {
-    pub model: String,
     pub count: usize,
     pub width_m: f64,
     pub forward_offset_m: f64,
@@ -227,6 +303,177 @@ pub struct LineSensorConfig {
     pub reflectance_noise_std: f64,
     pub adc_noise_lsb: f64,
     pub seed: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SensorType {
+    LineAnalog,
+    LineDigital,
+    DistanceInfrared,
+    DistanceToF,
+    Ultrasonic,
+    Color,
+    Encoder,
+    Gyro,
+    Accelerometer,
+    Custom,
+}
+
+impl SensorType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SensorType::LineAnalog => "LineAnalog",
+            SensorType::LineDigital => "LineDigital",
+            SensorType::DistanceInfrared => "DistanceInfrared",
+            SensorType::DistanceToF => "DistanceToF",
+            SensorType::Ultrasonic => "Ultrasonic",
+            SensorType::Color => "Color",
+            SensorType::Encoder => "Encoder",
+            SensorType::Gyro => "Gyro",
+            SensorType::Accelerometer => "Accelerometer",
+            SensorType::Custom => "Custom",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value.to_ascii_lowercase().as_str() {
+            "lineanalog" | "line_analog" | "analogline" | "analog_line" => SensorType::LineAnalog,
+            "linedigital" | "line_digital" | "digitalline" | "digital_line" => {
+                SensorType::LineDigital
+            }
+            "distanceinfrared" | "distance_ir" | "infrared" | "ir" => SensorType::DistanceInfrared,
+            "distancetof" | "tof" | "timeofflight" | "time_of_flight" => SensorType::DistanceToF,
+            "ultrasonic" => SensorType::Ultrasonic,
+            "color" => SensorType::Color,
+            "encoder" => SensorType::Encoder,
+            "gyro" | "gyroscope" => SensorType::Gyro,
+            "accelerometer" | "accel" => SensorType::Accelerometer,
+            _ => SensorType::Custom,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum SensorDetectionArea {
+    Point { radius_m: f64 },
+    Rectangle { width_m: f64, height_m: f64 },
+    Circle { radius_m: f64 },
+    Cone { range_m: f64, angle_deg: f64 },
+    CustomPolygon { points_m: Vec<Vec2> },
+}
+
+#[derive(Debug, Clone)]
+pub enum SensorResponseModel {
+    Ideal,
+    Threshold { threshold: f64 },
+    Linear { gain: f64, offset: f64 },
+    Polynomial { coefficients: Vec<f64> },
+    LookupTable { points: Vec<SensorResponsePoint> },
+    Custom { description: String },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SensorResponsePoint {
+    pub input: f64,
+    pub output: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SensorAsset {
+    pub name: String,
+    pub model: String,
+    pub sensor_type: SensorType,
+    pub visual_width_m: f64,
+    pub visual_height_m: f64,
+    pub visual_radius_m: f64,
+    pub detection_area: SensorDetectionArea,
+    pub response_model: SensorResponseModel,
+    pub notes: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RobotSensorInstance {
+    pub name: String,
+    pub asset_path: PathBuf,
+    pub asset: SensorAsset,
+    pub position_m: Vec2,
+    pub angle_deg: f64,
+    pub enabled: bool,
+    pub visible_in_preview: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FanCurveModel {
+    Linear,
+    Exponential,
+    Polynomial,
+    LookupTable,
+    Custom,
+}
+
+impl FanCurveModel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FanCurveModel::Linear => "Linear",
+            FanCurveModel::Exponential => "Exponential",
+            FanCurveModel::Polynomial => "Polynomial",
+            FanCurveModel::LookupTable => "LookupTable",
+            FanCurveModel::Custom => "Custom",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value.to_ascii_lowercase().as_str() {
+            "exponential" => FanCurveModel::Exponential,
+            "polynomial" => FanCurveModel::Polynomial,
+            "lookuptable" | "lookup_table" | "table" => FanCurveModel::LookupTable,
+            "custom" => FanCurveModel::Custom,
+            _ => FanCurveModel::Linear,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum DownforceModel {
+    None,
+    Constant {
+        force_n: f64,
+    },
+    LinearVoltage {
+        k_n_per_v: f64,
+        offset_n: f64,
+        max_force_n: f64,
+    },
+    LinearCurrent {
+        k_n_per_a: f64,
+        offset_n: f64,
+        max_force_n: f64,
+    },
+    Exponential {
+        a: f64,
+        b: f64,
+        max_force_n: f64,
+    },
+    Polynomial {
+        coefficients: Vec<f64>,
+        max_force_n: f64,
+    },
+    LookupTable {
+        points: Vec<DownforcePoint>,
+    },
+    Fan {
+        nominal_voltage_v: f64,
+        nominal_current_a: f64,
+        max_force_n: f64,
+        curve: FanCurveModel,
+        response_time_s: f64,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DownforcePoint {
+    pub input: f64,
+    pub force_n: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -261,7 +508,7 @@ pub struct PidConfig {
 pub struct TrackConfig {
     /// Schema of the file that was loaded/saved. `rtsim-track-v2` enables the
     /// parametric segment-based track editor; `rtsim-track-v1` remains supported
-    /// as a legacy sampled polyline cache.
+    /// as a sampled polyline cache.
     pub schema: String,
     pub name: String,
     pub model: String,
@@ -319,10 +566,17 @@ pub struct TireProfile {
 }
 
 #[derive(Debug, Clone)]
-pub struct LineSensorProfile {
+pub struct EncoderProfile {
     pub schema: String,
     pub name: String,
-    pub line_sensor: LineSensorConfig,
+    pub encoder: EncoderConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct GyroProfile {
+    pub schema: String,
+    pub name: String,
+    pub gyro: GyroConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -440,18 +694,28 @@ pub fn load_tire_profile_from_file(path: impl AsRef<Path>) -> Result<TireProfile
     parse_tire_profile_config(path, &profile_json).map_err(|err| err.to_string())
 }
 
-pub fn load_line_sensor_profile_from_file(
-    path: impl AsRef<Path>,
-) -> Result<LineSensorProfile, String> {
+pub fn load_encoder_profile_from_file(path: impl AsRef<Path>) -> Result<EncoderProfile, String> {
     let path = path.as_ref();
     let profile_json = read_json(path).map_err(|err| err.to_string())?;
-    parse_line_sensor_profile_config(path, &profile_json).map_err(|err| err.to_string())
+    parse_encoder_profile_config(path, &profile_json).map_err(|err| err.to_string())
+}
+
+pub fn load_gyro_profile_from_file(path: impl AsRef<Path>) -> Result<GyroProfile, String> {
+    let path = path.as_ref();
+    let profile_json = read_json(path).map_err(|err| err.to_string())?;
+    parse_gyro_profile_config(path, &profile_json).map_err(|err| err.to_string())
 }
 
 pub fn load_fan_profile_from_file(path: impl AsRef<Path>) -> Result<FanProfile, String> {
     let path = path.as_ref();
     let profile_json = read_json(path).map_err(|err| err.to_string())?;
     parse_fan_profile_config(path, &profile_json).map_err(|err| err.to_string())
+}
+
+pub fn load_sensor_asset_from_file(path: impl AsRef<Path>) -> Result<SensorAsset, String> {
+    let path = path.as_ref();
+    let sensor_json = read_json(path).map_err(|err| err.to_string())?;
+    parse_sensor_asset_config(path, &sensor_json).map_err(|err| err.to_string())
 }
 
 pub fn apply_surface_profile(track: &mut TrackV2, profile: &SurfaceProfile) {
@@ -585,7 +849,6 @@ fn parse_robot_config(path: &Path, root: &JsonValue) -> CfgResult<RobotConfig> {
     let motors_json = required_obj(path, root, "motors")?;
     let driver_json = root.get("driver");
     let battery_json = root.get("battery");
-    let sensor_json = required_obj(path, root, "line_sensor")?;
     let encoder_json = root.get("encoder");
     let gyro_json = root.get("gyro");
     let controller_json = required_obj(path, root, "controller")?;
@@ -621,9 +884,8 @@ fn parse_robot_config(path: &Path, root: &JsonValue) -> CfgResult<RobotConfig> {
     };
 
     let left_json = required_obj(path, motors_json, "left")?;
-    let right_json = required_obj(path, motors_json, "right")?;
     let motor_left = parse_motor(left_json);
-    let motor_right = parse_motor(right_json);
+    let motor_right = motor_left.clone();
 
     let driver = DriverConfig {
         model: nested_str(driver_json, "model", "PwmHBridge").to_string(),
@@ -654,18 +916,15 @@ fn parse_robot_config(path: &Path, root: &JsonValue) -> CfgResult<RobotConfig> {
         current_limit_a: nested_num(path, battery_json, "current_limit_a", 200.0)?,
     };
 
-    let line_sensor = LineSensorConfig {
-        model: str_field(path, sensor_json, "model", "NoisyAdcSensor")?.to_string(),
-        count: num_field(sensor_json, "count", 16.0) as usize,
-        width_m: num_field(sensor_json, "width_mm", 72.0) / 1000.0,
-        forward_offset_m: num_field(sensor_json, "forward_offset_mm", 55.0) / 1000.0,
-        adc_bits: num_field(sensor_json, "adc_bits", 12.0) as u32,
-        gain: num_field(sensor_json, "gain", 1.0),
-        offset: num_field(sensor_json, "offset", 0.0),
-        reflectance_noise_std: num_field(sensor_json, "reflectance_noise_std", 0.01),
-        adc_noise_lsb: num_field(sensor_json, "adc_noise_lsb", 1.0),
-        seed: num_field(sensor_json, "seed", 0x51A5_0001 as f64) as u64,
-    };
+    let mut sensors = parse_robot_sensor_instances(path, root.get("sensors"))?;
+    if let Some(shared) = sensors.first().cloned() {
+        for sensor in sensors.iter_mut().skip(1) {
+            sensor.asset_path = shared.asset_path.clone();
+            sensor.asset = shared.asset.clone();
+        }
+    }
+    let line_validity_areas =
+        parse_robot_line_validity_areas(path, root.get("line_validity_areas"), &chassis)?;
 
     let encoder = EncoderConfig {
         model: nested_str(encoder_json, "model", "QuantizedEncoder").to_string(),
@@ -696,20 +955,6 @@ fn parse_robot_config(path: &Path, root: &JsonValue) -> CfgResult<RobotConfig> {
         ),
     };
 
-    if line_sensor.count < 2 {
-        return Err(ConfigError::Invalid {
-            path: path.to_path_buf(),
-            field: "line_sensor.count".to_string(),
-            message: "must be at least 2".to_string(),
-        });
-    }
-    if line_sensor.adc_bits == 0 || line_sensor.adc_bits > 24 {
-        return Err(ConfigError::Invalid {
-            path: path.to_path_buf(),
-            field: "line_sensor.adc_bits".to_string(),
-            message: "must be between 1 and 24".to_string(),
-        });
-    }
     if encoder.ticks_per_rev == 0 {
         return Err(ConfigError::Invalid {
             path: path.to_path_buf(),
@@ -729,11 +974,51 @@ fn parse_robot_config(path: &Path, root: &JsonValue) -> CfgResult<RobotConfig> {
         motor_right,
         driver,
         battery,
-        line_sensor,
+        sensors,
+        line_validity_areas,
         encoder,
         gyro,
         controller,
     })
+}
+
+fn parse_robot_line_validity_areas(
+    path: &Path,
+    value: Option<&JsonValue>,
+    chassis: &ChassisConfig,
+) -> CfgResult<Vec<RobotLineValidityArea>> {
+    let Some(value) = value else {
+        return Ok(vec![RobotLineValidityArea {
+            name: "Main body".to_string(),
+            position_m: Vec2::new(0.0, 0.0),
+            length_m: chassis.length_m,
+            width_m: chassis.width_m,
+            angle_deg: 0.0,
+            enabled: true,
+        }]);
+    };
+    let arr = value.as_array().ok_or_else(|| ConfigError::Invalid {
+        path: path.to_path_buf(),
+        field: "line_validity_areas".to_string(),
+        message: "expected array".to_string(),
+    })?;
+    let mut areas = Vec::with_capacity(arr.len());
+    for (index, item) in arr.iter().enumerate() {
+        let name = item
+            .get("name")
+            .and_then(JsonValue::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("Area {}", index + 1));
+        areas.push(RobotLineValidityArea {
+            name,
+            position_m: vec2_mm_field(item, "position_mm", Vec2::new(0.0, 0.0)),
+            length_m: num_field(item, "length_mm", chassis.length_m * 1000.0).max(0.1) / 1000.0,
+            width_m: num_field(item, "width_mm", chassis.width_m * 1000.0).max(0.1) / 1000.0,
+            angle_deg: num_field(item, "angle_deg", 0.0),
+            enabled: nested_bool(Some(item), "enabled", true),
+        });
+    }
+    Ok(areas)
 }
 
 fn parse_normal_force(path: &Path, root: Option<&JsonValue>) -> CfgResult<NormalForceConfig> {
@@ -769,9 +1054,27 @@ fn parse_normal_force(path: &Path, root: Option<&JsonValue>) -> CfgResult<Normal
         .map(|v| parse_fans(path, v))
         .transpose()?
         .unwrap_or_default();
+    let model_kind = root
+        .and_then(|v| v.get("downforce_model"))
+        .map(|v| {
+            parse_downforce_model(
+                path,
+                v,
+                &model,
+                max_force_n,
+                response_time_s,
+                &force_curve,
+                &fans,
+            )
+        })
+        .transpose()?
+        .unwrap_or_else(|| {
+            default_downforce_model(&model, max_force_n, response_time_s, &force_curve, &fans)
+        });
 
     Ok(NormalForceConfig {
         model,
+        model_kind,
         command_pwm_default,
         position_m,
         max_force_n,
@@ -812,14 +1115,24 @@ fn parse_fan_config(path: &Path, fan: &JsonValue, field: &str) -> CfgResult<FanC
         .map(|v| parse_curve(path, v, &format!("{field}.force_curve")))
         .transpose()?
         .unwrap_or_default();
+    let max_current_a = num_field(fan, "max_current_a", 0.0);
+    let nominal_voltage_v = num_field(fan, "nominal_voltage_v", 7.4);
+    let nominal_current_a = num_field(fan, "nominal_current_a", max_current_a);
     Ok(FanConfig {
         position_m,
+        visual_radius_m: num_field(fan, "visual_radius_mm", 12.0) / 1000.0,
+        action_radius_m: num_field(fan, "action_radius_mm", 20.0) / 1000.0,
         max_force_n: num_field(fan, "max_force_n", 0.0),
-        max_current_a: num_field(fan, "max_current_a", 0.0),
-        nominal_voltage_v: num_field(fan, "nominal_voltage_v", 7.4),
+        max_current_a,
+        nominal_voltage_v,
+        nominal_current_a,
+        power_w: num_field(fan, "power_w", nominal_voltage_v * nominal_current_a),
+        min_pwm: num_field(fan, "min_pwm", 0.0),
+        max_pwm: num_field(fan, "max_pwm", 1.0),
         response_time_s: num_field(fan, "response_time_s", 0.0),
         pwm_scale: num_field(fan, "pwm_scale", 1.0),
         enabled_pwm: num_field(fan, "pwm", 1.0),
+        curve_model: FanCurveModel::from_str(nested_str(Some(fan), "curve_model", "LookupTable")),
         force_curve,
     })
 }
@@ -1084,7 +1397,6 @@ fn parse_surface_profile_config(path: &Path, root: &JsonValue) -> CfgResult<Surf
     })
 }
 
-
 fn profile_schema(root: &JsonValue, field: &str, default: &str) -> String {
     root.get(field)
         .or_else(|| root.get("profile_schema"))
@@ -1142,20 +1454,34 @@ fn parse_tire_profile_config(path: &Path, root: &JsonValue) -> CfgResult<TirePro
     })
 }
 
-fn parse_line_sensor_profile_config(path: &Path, root: &JsonValue) -> CfgResult<LineSensorProfile> {
-    let sensor_json = root
-        .get("line_sensor")
-        .or_else(|| root.get("sensor"))
-        .unwrap_or(root);
-    let line_sensor = parse_line_sensor_config(path, sensor_json)?;
-    Ok(LineSensorProfile {
-        schema: profile_schema(
-            root,
-            "line_sensor_profile_schema",
-            "rtsim-line-sensor-profile-v1",
-        ),
-        name: profile_name(root, sensor_json, &line_sensor.model),
-        line_sensor,
+fn parse_encoder_profile_config(path: &Path, root: &JsonValue) -> CfgResult<EncoderProfile> {
+    let value = root.get("encoder").unwrap_or(root);
+    let encoder = EncoderConfig {
+        model: nested_str(Some(value), "model", "QuantizedEncoder").to_string(),
+        ticks_per_rev: nested_num(path, Some(value), "ticks_per_rev", 360.0)? as u32,
+        invert_left: nested_bool(Some(value), "invert_left", false),
+        invert_right: nested_bool(Some(value), "invert_right", false),
+    };
+    Ok(EncoderProfile {
+        schema: profile_schema(root, "encoder_profile_schema", "rtsim-encoder-profile-v1"),
+        name: profile_name(root, value, &encoder.model),
+        encoder,
+    })
+}
+
+fn parse_gyro_profile_config(path: &Path, root: &JsonValue) -> CfgResult<GyroProfile> {
+    let value = root.get("gyro").unwrap_or(root);
+    let gyro = GyroConfig {
+        model: nested_str(Some(value), "model", "NoisyGyro").to_string(),
+        noise_std_rad_s: nested_num(path, Some(value), "noise_std_rad_s", 0.01)?,
+        bias_rad_s: nested_num(path, Some(value), "bias_rad_s", 0.0)?,
+        saturation_rad_s: nested_num(path, Some(value), "saturation_rad_s", 34.906585)?,
+        seed: nested_num(path, Some(value), "seed", 0x9A17_0002u64 as f64)? as u64,
+    };
+    Ok(GyroProfile {
+        schema: profile_schema(root, "gyro_profile_schema", "rtsim-gyro-profile-v1"),
+        name: profile_name(root, value, &gyro.model),
+        gyro,
     })
 }
 
@@ -1212,19 +1538,502 @@ fn parse_battery_config(path: &Path, battery_json: Option<&JsonValue>) -> CfgRes
     })
 }
 
-fn parse_line_sensor_config(path: &Path, sensor_json: &JsonValue) -> CfgResult<LineSensorConfig> {
-    Ok(LineSensorConfig {
-        model: str_field(path, sensor_json, "model", "NoisyAdcSensor")?.to_string(),
-        count: num_field(sensor_json, "count", 16.0) as usize,
-        width_m: num_field(sensor_json, "width_mm", 72.0) / 1000.0,
-        forward_offset_m: num_field(sensor_json, "forward_offset_mm", 55.0) / 1000.0,
-        adc_bits: num_field(sensor_json, "adc_bits", 12.0) as u32,
-        gain: num_field(sensor_json, "gain", 1.0),
-        offset: num_field(sensor_json, "offset", 0.0),
-        reflectance_noise_std: num_field(sensor_json, "reflectance_noise_std", 0.01),
-        adc_noise_lsb: num_field(sensor_json, "adc_noise_lsb", 1.0),
-        seed: num_field(sensor_json, "seed", 0x51A5_0001 as f64) as u64,
+fn default_sensor_asset() -> SensorAsset {
+    SensorAsset {
+        name: "Default Line Sensor".to_string(),
+        model: "GenericAnalogLineSensor".to_string(),
+        sensor_type: SensorType::LineAnalog,
+        visual_width_m: 8.0 / 1000.0,
+        visual_height_m: 8.0 / 1000.0,
+        visual_radius_m: 4.0 / 1000.0,
+        detection_area: SensorDetectionArea::Rectangle {
+            width_m: 5.0 / 1000.0,
+            height_m: 2.0 / 1000.0,
+        },
+        response_model: SensorResponseModel::Ideal,
+        notes: String::new(),
+    }
+}
+
+fn default_robot_sensor_instance() -> RobotSensorInstance {
+    RobotSensorInstance {
+        name: "Front line sensor".to_string(),
+        asset_path: PathBuf::from("RobotAssets/Sensors/default_line_sensor.json"),
+        asset: default_sensor_asset(),
+        position_m: Vec2::new(0.055, 0.0),
+        angle_deg: 0.0,
+        enabled: true,
+        visible_in_preview: true,
+    }
+}
+
+fn parse_robot_sensor_instances(
+    path: &Path,
+    value: Option<&JsonValue>,
+) -> CfgResult<Vec<RobotSensorInstance>> {
+    let Some(value) = value else {
+        return Ok(vec![default_robot_sensor_instance()]);
+    };
+    let arr = value.as_array().ok_or_else(|| ConfigError::Invalid {
+        path: path.to_path_buf(),
+        field: "sensors".to_string(),
+        message: "expected array".to_string(),
+    })?;
+    let mut sensors = Vec::with_capacity(arr.len());
+    for (i, item) in arr.iter().enumerate() {
+        sensors.push(parse_robot_sensor_instance(path, item, i)?);
+    }
+    Ok(sensors)
+}
+
+fn parse_robot_sensor_instance(
+    path: &Path,
+    item: &JsonValue,
+    index: usize,
+) -> CfgResult<RobotSensorInstance> {
+    let name = item
+        .get("name")
+        .or_else(|| item.get("instance_name"))
+        .and_then(JsonValue::as_str)
+        .unwrap_or("Sensor")
+        .to_string();
+    let asset_path = item
+        .get("asset_path")
+        .and_then(JsonValue::as_str)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("RobotAssets/Sensors/default_line_sensor.json"));
+    let asset = if let Some(asset_json) = item.get("asset") {
+        parse_sensor_asset_config(path, asset_json)?
+    } else {
+        let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+        let resolved = if asset_path.is_absolute() || asset_path.exists() {
+            asset_path.clone()
+        } else {
+            normalize_child_path(base_dir, &asset_path)
+        };
+        read_json(&resolved)
+            .ok()
+            .and_then(|json| parse_sensor_asset_config(&resolved, &json).ok())
+            .unwrap_or_else(default_sensor_asset)
+    };
+    let position_m = item
+        .get("position_mm")
+        .map(|_| vec2_mm_field(item, "position_mm", Vec2::new(0.055, 0.0)))
+        .unwrap_or_else(|| {
+            Vec2::new(
+                num_field(item, "position_x_mm", 55.0) / 1000.0,
+                num_field(item, "position_y_mm", 0.0) / 1000.0,
+            )
+        });
+    Ok(RobotSensorInstance {
+        name: if name == "Sensor" {
+            format!("Sensor {}", index + 1)
+        } else {
+            name
+        },
+        asset_path,
+        asset,
+        position_m,
+        angle_deg: num_field(item, "angle_deg", 0.0),
+        enabled: nested_bool(Some(item), "enabled", true),
+        visible_in_preview: nested_bool(Some(item), "visible_in_preview", true),
     })
+}
+
+fn parse_sensor_asset_config(path: &Path, root: &JsonValue) -> CfgResult<SensorAsset> {
+    let sensor_json = root
+        .get("sensor_asset")
+        .or_else(|| root.get("sensor"))
+        .unwrap_or(root);
+    Ok(SensorAsset {
+        name: sensor_json
+            .get("name")
+            .or_else(|| root.get("name"))
+            .and_then(JsonValue::as_str)
+            .unwrap_or("Default Line Sensor")
+            .to_string(),
+        model: nested_str(Some(sensor_json), "model", "GenericAnalogLineSensor").to_string(),
+        sensor_type: SensorType::from_str(nested_str(
+            Some(sensor_json),
+            "sensor_type",
+            "LineAnalog",
+        )),
+        visual_width_m: nested_num(path, Some(sensor_json), "visual_width_mm", 8.0)? / 1000.0,
+        visual_height_m: nested_num(path, Some(sensor_json), "visual_height_mm", 8.0)? / 1000.0,
+        visual_radius_m: nested_num(path, Some(sensor_json), "visual_radius_mm", 0.0)? / 1000.0,
+        detection_area: parse_sensor_detection_area(
+            path,
+            sensor_json.get("detection_area"),
+            "sensor_asset.detection_area",
+        )?,
+        response_model: parse_sensor_response_model(
+            path,
+            sensor_json.get("response_model"),
+            "sensor_asset.response_model",
+        )?,
+        notes: nested_str(Some(sensor_json), "notes", "").to_string(),
+    })
+}
+
+fn parse_sensor_detection_area(
+    path: &Path,
+    value: Option<&JsonValue>,
+    field: &str,
+) -> CfgResult<SensorDetectionArea> {
+    let Some(value) = value else {
+        return Ok(SensorDetectionArea::Point {
+            radius_m: 1.0 / 1000.0,
+        });
+    };
+    if let Some(kind) = value.get("kind").and_then(JsonValue::as_str) {
+        return parse_sensor_detection_area_by_kind(path, value, field, kind);
+    }
+    if let Some(rect) = value.get("Rectangle").or_else(|| value.get("rectangle")) {
+        return Ok(SensorDetectionArea::Rectangle {
+            width_m: nested_num(path, Some(rect), "width_mm", 5.0)? / 1000.0,
+            height_m: nested_num(path, Some(rect), "height_mm", 2.0)? / 1000.0,
+        });
+    }
+    if let Some(circle) = value.get("Circle").or_else(|| value.get("circle")) {
+        return Ok(SensorDetectionArea::Circle {
+            radius_m: nested_num(path, Some(circle), "radius_mm", 2.5)? / 1000.0,
+        });
+    }
+    if let Some(point) = value.get("Point").or_else(|| value.get("point")) {
+        return Ok(SensorDetectionArea::Point {
+            radius_m: nested_num(path, Some(point), "radius_mm", 1.0)? / 1000.0,
+        });
+    }
+    if let Some(cone) = value.get("Cone").or_else(|| value.get("cone")) {
+        return Ok(SensorDetectionArea::Cone {
+            range_m: nested_num(path, Some(cone), "range_mm", 80.0)? / 1000.0,
+            angle_deg: nested_num(path, Some(cone), "angle_deg", 25.0)?,
+        });
+    }
+    if let Some(poly) = value
+        .get("CustomPolygon")
+        .or_else(|| value.get("custom_polygon"))
+    {
+        return parse_sensor_polygon(path, poly, field);
+    }
+    Err(ConfigError::Invalid {
+        path: path.to_path_buf(),
+        field: field.to_string(),
+        message: "unsupported detection area".to_string(),
+    })
+}
+
+fn parse_sensor_detection_area_by_kind(
+    path: &Path,
+    value: &JsonValue,
+    field: &str,
+    kind: &str,
+) -> CfgResult<SensorDetectionArea> {
+    match kind.to_ascii_lowercase().as_str() {
+        "point" => Ok(SensorDetectionArea::Point {
+            radius_m: nested_num(path, Some(value), "radius_mm", 1.0)? / 1000.0,
+        }),
+        "rectangle" => Ok(SensorDetectionArea::Rectangle {
+            width_m: nested_num(path, Some(value), "width_mm", 5.0)? / 1000.0,
+            height_m: nested_num(path, Some(value), "height_mm", 2.0)? / 1000.0,
+        }),
+        "circle" => Ok(SensorDetectionArea::Circle {
+            radius_m: nested_num(path, Some(value), "radius_mm", 2.5)? / 1000.0,
+        }),
+        "cone" => Ok(SensorDetectionArea::Cone {
+            range_m: nested_num(path, Some(value), "range_mm", 80.0)? / 1000.0,
+            angle_deg: nested_num(path, Some(value), "angle_deg", 25.0)?,
+        }),
+        "custompolygon" | "custom_polygon" => parse_sensor_polygon(path, value, field),
+        other => Err(ConfigError::Invalid {
+            path: path.to_path_buf(),
+            field: field.to_string(),
+            message: format!("unsupported detection area kind '{other}'"),
+        }),
+    }
+}
+
+fn parse_sensor_polygon(
+    path: &Path,
+    value: &JsonValue,
+    field: &str,
+) -> CfgResult<SensorDetectionArea> {
+    let arr = value
+        .get("points_mm")
+        .unwrap_or(value)
+        .as_array()
+        .ok_or_else(|| ConfigError::Invalid {
+            path: path.to_path_buf(),
+            field: field.to_string(),
+            message: "expected points_mm array".to_string(),
+        })?;
+    let mut points = Vec::with_capacity(arr.len());
+    for (i, item) in arr.iter().enumerate() {
+        let pair = item.as_array().ok_or_else(|| ConfigError::Invalid {
+            path: path.to_path_buf(),
+            field: format!("{field}[{i}]"),
+            message: "expected [x_mm, y_mm]".to_string(),
+        })?;
+        if pair.len() != 2 {
+            return Err(ConfigError::Invalid {
+                path: path.to_path_buf(),
+                field: format!("{field}[{i}]"),
+                message: "expected [x_mm, y_mm]".to_string(),
+            });
+        }
+        let x = pair[0].as_f64().unwrap_or(0.0) / 1000.0;
+        let y = pair[1].as_f64().unwrap_or(0.0) / 1000.0;
+        points.push(Vec2::new(x, y));
+    }
+    Ok(SensorDetectionArea::CustomPolygon { points_m: points })
+}
+
+fn parse_sensor_response_model(
+    path: &Path,
+    value: Option<&JsonValue>,
+    field: &str,
+) -> CfgResult<SensorResponseModel> {
+    let Some(value) = value else {
+        return Ok(SensorResponseModel::Ideal);
+    };
+    if let Some(kind) = value.as_str() {
+        return Ok(match kind.to_ascii_lowercase().as_str() {
+            "ideal" => SensorResponseModel::Ideal,
+            other => SensorResponseModel::Custom {
+                description: other.to_string(),
+            },
+        });
+    }
+    let kind = value
+        .get("kind")
+        .and_then(JsonValue::as_str)
+        .or_else(|| value.get("type").and_then(JsonValue::as_str))
+        .unwrap_or("Ideal");
+    match kind.to_ascii_lowercase().as_str() {
+        "ideal" => Ok(SensorResponseModel::Ideal),
+        "threshold" => Ok(SensorResponseModel::Threshold {
+            threshold: nested_num(path, Some(value), "threshold", 0.5)?,
+        }),
+        "linear" => Ok(SensorResponseModel::Linear {
+            gain: nested_num(path, Some(value), "gain", 1.0)?,
+            offset: nested_num(path, Some(value), "offset", 0.0)?,
+        }),
+        "polynomial" => Ok(SensorResponseModel::Polynomial {
+            coefficients: parse_number_array(value.get("coefficients"))
+                .unwrap_or_else(|| vec![0.0, 1.0]),
+        }),
+        "lookuptable" | "lookup_table" => Ok(SensorResponseModel::LookupTable {
+            points: parse_sensor_response_points(path, value.get("points"), field)?,
+        }),
+        "custom" => Ok(SensorResponseModel::Custom {
+            description: nested_str(Some(value), "description", "").to_string(),
+        }),
+        other => Err(ConfigError::Invalid {
+            path: path.to_path_buf(),
+            field: field.to_string(),
+            message: format!("unsupported response model '{other}'"),
+        }),
+    }
+}
+
+fn parse_sensor_response_points(
+    path: &Path,
+    value: Option<&JsonValue>,
+    field: &str,
+) -> CfgResult<Vec<SensorResponsePoint>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let arr = value.as_array().ok_or_else(|| ConfigError::Invalid {
+        path: path.to_path_buf(),
+        field: format!("{field}.points"),
+        message: "expected array".to_string(),
+    })?;
+    let mut points = Vec::with_capacity(arr.len());
+    for (i, item) in arr.iter().enumerate() {
+        if let Some(pair) = item.as_array() {
+            if pair.len() == 2 {
+                points.push(SensorResponsePoint {
+                    input: pair[0].as_f64().unwrap_or(0.0),
+                    output: pair[1].as_f64().unwrap_or(0.0),
+                });
+                continue;
+            }
+        }
+        points.push(SensorResponsePoint {
+            input: nested_num(path, Some(item), "input", i as f64)?,
+            output: nested_num(path, Some(item), "output", 0.0)?,
+        });
+    }
+    Ok(points)
+}
+
+fn parse_number_array(value: Option<&JsonValue>) -> Option<Vec<f64>> {
+    let arr = value?.as_array()?;
+    Some(arr.iter().filter_map(JsonValue::as_f64).collect())
+}
+
+fn default_downforce_model(
+    model: &str,
+    max_force_n: f64,
+    response_time_s: f64,
+    force_curve: &[(f64, f64)],
+    fans: &[FanConfig],
+) -> DownforceModel {
+    match model.to_ascii_lowercase().as_str() {
+        "constantdownforce" => DownforceModel::Constant {
+            force_n: max_force_n,
+        },
+        "fandownforce" => {
+            let fan = fans.first();
+            DownforceModel::Fan {
+                nominal_voltage_v: fan.map(|f| f.nominal_voltage_v).unwrap_or(7.4),
+                nominal_current_a: fan.map(|f| f.nominal_current_a).unwrap_or(0.0),
+                max_force_n: fan.map(|f| f.max_force_n).unwrap_or(max_force_n),
+                curve: fan
+                    .map(|f| f.curve_model)
+                    .unwrap_or(FanCurveModel::LookupTable),
+                response_time_s: fan.map(|f| f.response_time_s).unwrap_or(response_time_s),
+            }
+        }
+        "measureddownforcecurve" => DownforceModel::LookupTable {
+            points: force_curve
+                .iter()
+                .map(|(input, force_n)| DownforcePoint {
+                    input: *input,
+                    force_n: *force_n,
+                })
+                .collect(),
+        },
+        _ => DownforceModel::None,
+    }
+}
+
+fn parse_downforce_model(
+    path: &Path,
+    value: &JsonValue,
+    fallback_model: &str,
+    max_force_n: f64,
+    response_time_s: f64,
+    force_curve: &[(f64, f64)],
+    fans: &[FanConfig],
+) -> CfgResult<DownforceModel> {
+    let kind = value
+        .as_str()
+        .or_else(|| {
+            value
+                .get("kind")
+                .or_else(|| value.get("type"))
+                .and_then(JsonValue::as_str)
+        })
+        .unwrap_or(fallback_model);
+    Ok(match kind.to_ascii_lowercase().as_str() {
+        "none" | "nodownforce" => DownforceModel::None,
+        "constant" | "constantdownforce" => DownforceModel::Constant {
+            force_n: nested_num(path, Some(value), "force_n", max_force_n)?,
+        },
+        "linearvoltage" | "linear_voltage" => DownforceModel::LinearVoltage {
+            k_n_per_v: nested_num(path, Some(value), "k_n_per_v", 0.0)?,
+            offset_n: nested_num(path, Some(value), "offset_n", 0.0)?,
+            max_force_n: nested_num(path, Some(value), "max_force_n", max_force_n)?,
+        },
+        "linearcurrent" | "linear_current" => DownforceModel::LinearCurrent {
+            k_n_per_a: nested_num(path, Some(value), "k_n_per_a", 0.0)?,
+            offset_n: nested_num(path, Some(value), "offset_n", 0.0)?,
+            max_force_n: nested_num(path, Some(value), "max_force_n", max_force_n)?,
+        },
+        "exponential" => DownforceModel::Exponential {
+            a: nested_num(path, Some(value), "a", 0.0)?,
+            b: nested_num(path, Some(value), "b", 1.0)?,
+            max_force_n: nested_num(path, Some(value), "max_force_n", max_force_n)?,
+        },
+        "polynomial" => DownforceModel::Polynomial {
+            coefficients: parse_number_array(value.get("coefficients"))
+                .unwrap_or_else(|| vec![0.0, 1.0]),
+            max_force_n: nested_num(path, Some(value), "max_force_n", max_force_n)?,
+        },
+        "lookuptable" | "lookup_table" | "measureddownforcecurve" => DownforceModel::LookupTable {
+            points: value
+                .get("points")
+                .map(|points| parse_downforce_points(path, points, "downforce_model.points"))
+                .transpose()?
+                .unwrap_or_else(|| {
+                    force_curve
+                        .iter()
+                        .map(|(input, force_n)| DownforcePoint {
+                            input: *input,
+                            force_n: *force_n,
+                        })
+                        .collect()
+                }),
+        },
+        "fan" | "fandownforce" => {
+            let fan = fans.first();
+            DownforceModel::Fan {
+                nominal_voltage_v: nested_num(
+                    path,
+                    Some(value),
+                    "nominal_voltage_v",
+                    fan.map(|f| f.nominal_voltage_v).unwrap_or(7.4),
+                )?,
+                nominal_current_a: nested_num(
+                    path,
+                    Some(value),
+                    "nominal_current_a",
+                    fan.map(|f| f.nominal_current_a).unwrap_or(0.0),
+                )?,
+                max_force_n: nested_num(
+                    path,
+                    Some(value),
+                    "max_force_n",
+                    fan.map(|f| f.max_force_n).unwrap_or(max_force_n),
+                )?,
+                curve: FanCurveModel::from_str(nested_str(Some(value), "curve", "LookupTable")),
+                response_time_s: nested_num(
+                    path,
+                    Some(value),
+                    "response_time_s",
+                    fan.map(|f| f.response_time_s).unwrap_or(response_time_s),
+                )?,
+            }
+        }
+        _ => default_downforce_model(
+            fallback_model,
+            max_force_n,
+            response_time_s,
+            force_curve,
+            fans,
+        ),
+    })
+}
+
+fn parse_downforce_points(
+    path: &Path,
+    value: &JsonValue,
+    field: &str,
+) -> CfgResult<Vec<DownforcePoint>> {
+    let arr = value.as_array().ok_or_else(|| ConfigError::Invalid {
+        path: path.to_path_buf(),
+        field: field.to_string(),
+        message: "expected array".to_string(),
+    })?;
+    let mut points = Vec::with_capacity(arr.len());
+    for (i, item) in arr.iter().enumerate() {
+        if let Some(pair) = item.as_array() {
+            if pair.len() == 2 {
+                points.push(DownforcePoint {
+                    input: pair[0].as_f64().unwrap_or(0.0),
+                    force_n: pair[1].as_f64().unwrap_or(0.0),
+                });
+                continue;
+            }
+        }
+        points.push(DownforcePoint {
+            input: nested_num(path, Some(item), "input", i as f64)?,
+            force_n: nested_num(path, Some(item), "force_n", 0.0)?,
+        });
+    }
+    Ok(points)
 }
 
 fn parse_track_surface(path: &Path, value: Option<&JsonValue>) -> CfgResult<TrackSurfaceConfig> {
@@ -1495,4 +2304,48 @@ fn nested_pose(
             message: "expected number".to_string(),
         })?,
     ))
+}
+
+#[cfg(test)]
+mod robot_line_validity_tests {
+    use super::*;
+
+    fn area() -> RobotLineValidityArea {
+        RobotLineValidityArea {
+            name: "side arm".to_string(),
+            position_m: Vec2::new(0.0, 0.050),
+            length_m: 0.100,
+            width_m: 0.010,
+            angle_deg: 0.0,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn validity_rectangle_overlaps_a_line_segment() {
+        assert!(area().overlaps_line_segment(
+            Pose2::new(1.0, 2.0, 0.0),
+            Vec2::new(0.9, 2.050),
+            Vec2::new(1.1, 2.050),
+            0.020,
+        ));
+    }
+
+    #[test]
+    fn disabled_or_distant_rectangle_does_not_overlap() {
+        let mut validity_area = area();
+        assert!(!validity_area.overlaps_line_segment(
+            Pose2::new(0.0, 0.0, 0.0),
+            Vec2::new(-0.1, -0.1),
+            Vec2::new(0.1, -0.1),
+            0.020,
+        ));
+        validity_area.enabled = false;
+        assert!(!validity_area.overlaps_line_segment(
+            Pose2::new(0.0, 0.0, 0.0),
+            Vec2::new(-0.1, 0.050),
+            Vec2::new(0.1, 0.050),
+            0.020,
+        ));
+    }
 }

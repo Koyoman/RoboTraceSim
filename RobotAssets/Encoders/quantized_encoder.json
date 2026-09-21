@@ -1,0 +1,10 @@
+{
+  "encoder_profile_schema": "rtsim-encoder-profile-v1",
+  "name": "Quantized Encoder",
+  "encoder": {
+    "model": "QuantizedEncoder",
+    "ticks_per_rev": 360,
+    "invert_left": false,
+    "invert_right": false
+  }
+}

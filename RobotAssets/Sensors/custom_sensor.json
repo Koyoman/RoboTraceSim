@@ -1,0 +1,30 @@
+{
+  "name": "Custom Sensor",
+  "model": "Custom",
+  "sensor_type": "Custom",
+  "visual_width_mm": 10.0,
+  "visual_height_mm": 10.0,
+  "visual_radius_mm": 0.0,
+  "detection_area": {
+    "kind": "CustomPolygon",
+    "points_mm": [
+      [
+        0.0,
+        -5.0
+      ],
+      [
+        20.0,
+        0.0
+      ],
+      [
+        0.0,
+        5.0
+      ]
+    ]
+  },
+  "response_model": {
+    "kind": "Custom",
+    "description": "Describe future sensor response here."
+  },
+  "notes": ""
+}

@@ -1,0 +1,19 @@
+{
+  "name": "QTR Analog Sensor Individual",
+  "model": "QTRAnalogSingle",
+  "sensor_type": "LineAnalog",
+  "visual_width_mm": 7.5,
+  "visual_height_mm": 7.5,
+  "visual_radius_mm": 3.75,
+  "detection_area": {
+    "kind": "Rectangle",
+    "width_mm": 4.0,
+    "height_mm": 1.5
+  },
+  "response_model": {
+    "kind": "Linear",
+    "gain": 1.0,
+    "offset": 0.0
+  },
+  "notes": "Reusable asset for one reflectance sensor position."
+}

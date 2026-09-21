@@ -1,5 +1,5 @@
 use crate::battery::{BatteryOutput, VoltageSagBattery};
-use crate::config::{LoadedConfig, TimeConfig};
+use crate::config::{LineSensorConfig, LoadedConfig, RobotConfig, SensorResponseModel, TimeConfig};
 use crate::controller::{BuiltInPid, Controller, ControllerOutput};
 use crate::encoder::{EncoderOutput, QuantizedEncoder};
 use crate::gyro::{GyroOutput, NoisyGyro};
@@ -9,7 +9,7 @@ use crate::normal_force::{
     ConfiguredNormalForce, NormalForceInput, NormalForceModel, NormalForceOutput,
 };
 use crate::replay::BinaryReplayLogger;
-use crate::rtsim_track::{validate_track, Severity, TrackRulesMode};
+use crate::rtsim_track::{robot_has_valid_line_overlap, validate_track, Severity, TrackRulesMode};
 use crate::sensor::{SensorModel, SensorOutput, SimpleLineSensor};
 use crate::telemetry::{CsvLogger, TelemetrySample};
 use crate::track::{TrackModel, VectorTrack};
@@ -96,6 +96,7 @@ pub struct SimulationSession {
     next_encoder_us: u64,
     next_imu_us: u64,
     next_controller_us: u64,
+    robot_over_line: bool,
 }
 
 impl SimulationSession {
@@ -111,7 +112,7 @@ impl SimulationSession {
             ..RobotState::default()
         };
         let track = VectorTrack::new(cfg.track.clone());
-        let mut sensor = SimpleLineSensor::new(cfg.robot.line_sensor.clone());
+        let mut sensor = SimpleLineSensor::new(runtime_line_sensor_config(&cfg.robot));
         let mut encoder = QuantizedEncoder::new(cfg.robot.encoder.clone());
         let mut gyro = NoisyGyro::new(cfg.robot.gyro.clone());
         let mut controller = BuiltInPid::new(cfg.robot.controller);
@@ -120,6 +121,12 @@ impl SimulationSession {
         let tire = SlipRatioWheel::new(cfg.robot.tire.clone());
         let mut normal_force = ConfiguredNormalForce::new(cfg.robot.normal_force.clone());
         let battery = VoltageSagBattery::new(cfg.robot.battery.clone());
+        let robot_over_line = cfg
+            .track
+            .parametric
+            .as_ref()
+            .map(|track| robot_has_valid_line_overlap(track, &cfg.robot, state.pose))
+            .unwrap_or(true);
 
         let sensor_output = sensor.sample(&track, state.pose, 0);
         let encoder_output =
@@ -170,6 +177,7 @@ impl SimulationSession {
             next_encoder_us: time.encoder_period_us,
             next_imu_us: time.imu_period_us,
             next_controller_us: time.controller_period_us,
+            robot_over_line,
         })
     }
 
@@ -191,6 +199,10 @@ impl SimulationSession {
 
     pub fn is_finished(&self) -> bool {
         self.step_idx >= self.max_steps
+    }
+
+    pub fn robot_over_line(&self) -> bool {
+        self.robot_over_line
     }
 
     pub fn sample(&self) -> TelemetrySample {
@@ -261,6 +273,13 @@ impl SimulationSession {
             self.ctrl_output,
             self.time.physics_dt_us,
         );
+        self.robot_over_line = self
+            .cfg
+            .track
+            .parametric
+            .as_ref()
+            .map(|track| robot_has_valid_line_overlap(track, &self.cfg.robot, self.state.pose))
+            .unwrap_or(true);
         self.step_idx = self.step_idx.saturating_add(1);
         sample
     }
@@ -292,7 +311,7 @@ pub fn run_simulation(cfg: LoadedConfig, options: RunOptions) -> Result<RunSumma
         ..RobotState::default()
     };
     let track = VectorTrack::new(cfg.track.clone());
-    let mut sensor = SimpleLineSensor::new(cfg.robot.line_sensor.clone());
+    let mut sensor = SimpleLineSensor::new(runtime_line_sensor_config(&cfg.robot));
     let mut encoder = QuantizedEncoder::new(cfg.robot.encoder.clone());
     let mut gyro = NoisyGyro::new(cfg.robot.gyro.clone());
     let mut controller = BuiltInPid::new(cfg.robot.controller);
@@ -458,6 +477,58 @@ pub fn run_simulation(cfg: LoadedConfig, options: RunOptions) -> Result<RunSumma
         csv_path,
         replay_path,
     })
+}
+
+fn runtime_line_sensor_config(robot: &RobotConfig) -> LineSensorConfig {
+    let line_sensors: Vec<_> = robot
+        .sensors
+        .iter()
+        .filter(|sensor| {
+            sensor.enabled
+                && matches!(
+                    sensor.asset.sensor_type,
+                    crate::config::SensorType::LineAnalog | crate::config::SensorType::LineDigital
+                )
+        })
+        .collect();
+    let count = line_sensors.len().max(2);
+    let min_y = line_sensors
+        .iter()
+        .map(|sensor| sensor.position_m.y)
+        .reduce(f64::min)
+        .unwrap_or(-0.036);
+    let max_y = line_sensors
+        .iter()
+        .map(|sensor| sensor.position_m.y)
+        .reduce(f64::max)
+        .unwrap_or(0.036);
+    let forward_offset_m = if line_sensors.is_empty() {
+        0.055
+    } else {
+        line_sensors
+            .iter()
+            .map(|sensor| sensor.position_m.x)
+            .sum::<f64>()
+            / line_sensors.len() as f64
+    };
+    let (gain, offset) = line_sensors
+        .first()
+        .map(|sensor| match sensor.asset.response_model {
+            SensorResponseModel::Linear { gain, offset } => (gain, offset),
+            _ => (1.0, 0.0),
+        })
+        .unwrap_or((1.0, 0.0));
+    LineSensorConfig {
+        count,
+        width_m: (max_y - min_y).abs().max(0.001),
+        forward_offset_m,
+        adc_bits: 12,
+        gain,
+        offset,
+        reflectance_noise_std: 0.01,
+        adc_noise_lsb: 1.0,
+        seed: 0x51A5_0001,
+    }
 }
 
 fn validate_track_for_simulation(cfg: &LoadedConfig) -> Result<(), String> {

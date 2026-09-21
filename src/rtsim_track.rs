@@ -4,6 +4,7 @@
 //! model.  The parametric track is the authoritative geometry; sampled polylines
 //! and raster maps are caches derived from it for rendering and simulation.
 
+use crate::config::RobotConfig;
 use crate::math::{clamp, distance_point_segment, wrap_angle, Pose2, Vec2};
 use std::collections::HashSet;
 
@@ -607,6 +608,19 @@ pub fn reflectance_at(track: &TrackV2, point_m: Vec2) -> f64 {
     } else {
         track.surface.base_reflectance
     }
+}
+
+/// Applies the Robotrace validity rule: any configured robot rectangle over the
+/// course line keeps the robot valid.
+pub fn robot_has_valid_line_overlap(track: &TrackV2, robot: &RobotConfig, pose: Pose2) -> bool {
+    let geometry = build_geometry(track);
+    let line_width_m = resolve_rules(&track.rules).line_width_mm / 1000.0;
+    robot.line_validity_areas.iter().any(|area| {
+        geometry
+            .centerline_m
+            .windows(2)
+            .any(|segment| area.overlaps_line_segment(pose, segment[0], segment[1], line_width_m))
+    })
 }
 
 pub fn surface_mu_at(track: &TrackV2, _point_m: Vec2) -> f64 {

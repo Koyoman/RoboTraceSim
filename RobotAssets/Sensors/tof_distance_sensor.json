@@ -1,0 +1,15 @@
+{
+  "name": "ToF Distance Sensor",
+  "model": "GenericToF",
+  "sensor_type": "DistanceToF",
+  "visual_width_mm": 18.0,
+  "visual_height_mm": 12.0,
+  "visual_radius_mm": 0.0,
+  "detection_area": {
+    "kind": "Cone",
+    "range_mm": 300.0,
+    "angle_deg": 25.0
+  },
+  "response_model": "Ideal",
+  "notes": "Detection cone is visual/read area and does not count as physical footprint."
+}

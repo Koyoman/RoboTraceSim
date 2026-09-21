@@ -1,0 +1,11 @@
+{
+  "gyro_profile_schema": "rtsim-gyro-profile-v1",
+  "name": "Noisy Gyro",
+  "gyro": {
+    "model": "NoisyGyro",
+    "noise_std_rad_s": 0.01,
+    "bias_rad_s": 0.0,
+    "saturation_rad_s": 34.906585,
+    "seed": 2585202690
+  }
+}

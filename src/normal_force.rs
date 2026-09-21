@@ -263,11 +263,12 @@ fn add_point_load(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::NormalForceConfig;
+    use crate::config::{DownforceModel, NormalForceConfig};
 
     fn base_cfg(model: &str) -> NormalForceConfig {
         NormalForceConfig {
             model: model.to_string(),
+            model_kind: DownforceModel::None,
             command_pwm_default: 1.0,
             position_m: Vec2::new(0.0, 0.0),
             max_force_n: 2.0,

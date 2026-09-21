@@ -1,0 +1,17 @@
+{
+  "name": "Digital Line Sensor",
+  "model": "GenericDigitalLineSensor",
+  "sensor_type": "LineDigital",
+  "visual_width_mm": 8.0,
+  "visual_height_mm": 8.0,
+  "visual_radius_mm": 4.0,
+  "detection_area": {
+    "kind": "Point",
+    "radius_mm": 2.0
+  },
+  "response_model": {
+    "kind": "Threshold",
+    "threshold": 0.5
+  },
+  "notes": ""
+}

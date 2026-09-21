@@ -1,0 +1,15 @@
+{
+  "name": "Default Line Sensor",
+  "model": "GenericAnalogLineSensor",
+  "sensor_type": "LineAnalog",
+  "visual_width_mm": 8.0,
+  "visual_height_mm": 8.0,
+  "visual_radius_mm": 4.0,
+  "detection_area": {
+    "kind": "Rectangle",
+    "width_mm": 5.0,
+    "height_mm": 2.0
+  },
+  "response_model": "Ideal",
+  "notes": "Default reusable line sensor asset. Position stays only in robot.json."
+}
