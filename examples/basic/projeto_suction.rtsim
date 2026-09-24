@@ -1,6 +1,6 @@
 {
   "rtsim_schema": "rtsim-project-v1",
-  "name": "basic-v0.08-suction-demo",
+  "name": "basic-0.6.0-suction-demo",
   "robot": "robot_suction.json",
   "track": "track.json",
   "time": {

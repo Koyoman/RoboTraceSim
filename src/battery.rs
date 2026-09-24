@@ -41,13 +41,10 @@ impl VoltageSagBattery {
     }
 
     pub fn step(&mut self, load_current_a: f64, dt_us: u64) -> BatteryOutput {
-        let current_a = clamp(
-            load_current_a.max(0.0),
-            0.0,
-            self.cfg.current_limit_a.max(0.0),
-        );
+        // Actuation is limited by the core before committing this load; do not hide overloads.
+        let current_a = load_current_a;
         let dt_s = dt_us as f64 / 1_000_000.0;
-        let capacity_coulomb = (self.cfg.capacity_mah.max(1e-9) / 1000.0) * 3600.0;
+        let capacity_coulomb = (self.cfg.capacity_mah / 1000.0) * 3600.0;
         self.soc = clamp(self.soc - current_a * dt_s / capacity_coulomb, 0.0, 1.0);
 
         let open = open_circuit_voltage(&self.cfg, self.soc);

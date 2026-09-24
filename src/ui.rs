@@ -1,5 +1,8 @@
 #[cfg(feature = "gui")]
 mod gui {
+    mod robot_editor {
+        include!("app/robot_editor.rs");
+    }
     use crate::calibration::{
         compare_project_with_real, import_real_log, tune_project_against_real,
         write_comparison_csv, write_comparison_report, write_normalized_real_log,
@@ -12,28 +15,35 @@ mod gui {
         load_motor_profile_from_file, load_robot_from_file, load_sensor_asset_from_file,
         load_surface_profile_from_file, load_tire_profile_from_file, load_track_from_file,
         refresh_track_cache, surface_profile_from_track, BatteryConfig, BatteryProfile,
-        ChassisConfig, DownforceModel, DriverConfig, DriverProfile, DrivetrainConfig,
-        EncoderConfig, EncoderProfile, FanConfig, FanCurveModel, FanProfile, GyroConfig,
-        GyroProfile, LoadedConfig, MotorConfig, MotorProfile, NormalForceConfig, PidConfig,
-        ProjectConfig, RobotConfig, RobotLineValidityArea, RobotSensorInstance, SensorAsset,
-        SensorDetectionArea, SensorResponseModel, SensorResponsePoint, SensorType, SurfaceProfile,
-        TimeConfig, TireConfig, TireProfile, TrackConfig,
+        ChassisConfig, DriverConfig, DriverProfile, DrivetrainConfig, EncoderConfig,
+        EncoderProfile, FanConfig, FanCurveModel, FanProfile, GyroConfig, GyroProfile,
+        LoadedConfig, MotorConfig, MotorProfile, NormalForceConfig, PidConfig, ProjectConfig,
+        RobotConfig, RobotLineValidityArea, RobotSensorInstance, SensorAsset, SensorDetectionArea,
+        SensorResponseModel, SensorResponsePoint, SensorType, TimeConfig, TireConfig, TireProfile,
+        TrackConfig,
     };
+    use crate::experiments::jobs::{Preview, SimulationWorker};
+    use crate::io::persistence::*;
     use crate::math::{Pose2, Vec2};
-    use crate::replay::{export_replay_to_csv, load_replay_samples, ReplayData};
+    use crate::replay::export_replay_to_csv;
     use crate::rtsim_track::{
         auto_close_with_straight, build_geometry, center_start_finish_on_segment,
         clamp_start_finish_to_segment, next_segment_id, resolve_robot_start_pose, resolve_rules,
         resolve_start_finish_markers, robot_start_allowed_area_corners,
         start_finish_required_length_mm, valid_start_finish_segments, validate_track, ArcSegment,
-        MarkerSide, Severity, StartExitDirection, StraightSegment, TrackRulesMode, TrackSegment,
-        TrackV2, ROBOT_START_MARKER_CLEARANCE_MM, ROBOT_START_MAX_LATERAL_OFFSET_MM,
+        Severity, StartExitDirection, StraightSegment, TrackRulesMode, TrackSegment, TrackV2,
+        ROBOT_START_MARKER_CLEARANCE_MM,
     };
-    use crate::sim::{run_simulation, RunOptions, SimulationSession};
+    use crate::sim::RunOptions;
     use crate::telemetry::TelemetrySample;
     use eframe::egui;
+    use robot_editor::*;
+    mod track_editor {
+        include!("app/track_editor.rs");
+    }
     use std::fs;
     use std::path::{Path, PathBuf};
+    use track_editor::*;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum AppView {
@@ -163,7 +173,7 @@ mod gui {
     pub fn run_app() -> Result<(), String> {
         let options = eframe::NativeOptions::default();
         eframe::run_native(
-            "Robotrace Sim v0.08",
+            concat!("Robotrace Sim ", env!("CARGO_PKG_VERSION")),
             options,
             Box::new(|cc| Box::new(RTSimApp::new(cc))),
         )
@@ -201,8 +211,13 @@ mod gui {
         replay_path_text: String,
         track_file_path_text: String,
         track_dirty: bool,
+        track_history: crate::track::definition::TrackEditHistory,
+        track_history_pending: Option<(TrackConfig, Pose2)>,
         robot_file_path_text: String,
         robot_dirty: bool,
+        robot_history: crate::models::robot::RobotHistory,
+        robot_history_pending: Option<RobotConfig>,
+        robot_selection: Option<String>,
         motor_left_asset_path_text: String,
         driver_asset_path_text: String,
         battery_asset_path_text: String,
@@ -218,19 +233,34 @@ mod gui {
         track_view_zoom: f32,
         track_view_pan_m: Vec2,
         robot_preview_camera: RobotPreviewCamera,
-        sim_session: Option<SimulationSession>,
+        sim_session: Option<SimulationWorker>,
         sim_running: bool,
-        sim_steps_per_frame: u64,
+        worker_preview: Option<Preview>,
+        auto_open_replay: bool,
+        replay_config: Option<LoadedConfig>,
+        replay_time_s: f64,
+        replay_speed: f64,
+        replay_playing: bool,
+        auxiliary_job:
+            Option<crate::experiments::jobs::BackgroundJob<(String, Option<ComparisonMetrics>)>>,
+        replay_job: Option<
+            crate::experiments::jobs::BackgroundJob<(
+                crate::replay::IndexedReplay,
+                Option<LoadedConfig>,
+            )>,
+        >,
         sim_duration_s: f64,
         last_sim_sample: Option<TelemetrySample>,
-        replay: Option<ReplayData>,
-        replay_index: usize,
+        replay: Option<crate::replay::IndexedReplay>,
+
         replay_max_samples: usize,
         real_log_path_text: String,
         calibration_csv_path_text: String,
         calibration_report_path_text: String,
         tuning_output_path_text: String,
         last_calibration_metrics: Option<ComparisonMetrics>,
+        study_path: String,
+        study_report_path: String,
     }
 
     impl RTSimApp {
@@ -239,6 +269,9 @@ mod gui {
         }
 
         fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+            Self::initial()
+        }
+        fn initial() -> Self {
             let mut app = Self {
                 view: AppView::Home,
                 cfg: None,
@@ -246,8 +279,13 @@ mod gui {
                 replay_path_text: "examples/basic/resultado.rtlog".to_string(),
                 track_file_path_text: "examples/basic/track.json".to_string(),
                 track_dirty: false,
+                track_history: Default::default(),
+                track_history_pending: None,
                 robot_file_path_text: "examples/basic/robot.json".to_string(),
                 robot_dirty: false,
+                robot_history: Default::default(),
+                robot_history_pending: None,
+                robot_selection: None,
                 motor_left_asset_path_text: "RobotAssets/Motors/n20_simple_left.json".to_string(),
                 driver_asset_path_text: "RobotAssets/Drivers/pwm_hbridge.json".to_string(),
                 battery_asset_path_text: "RobotAssets/Batteries/2s_lipo_7400mv.json".to_string(),
@@ -265,17 +303,26 @@ mod gui {
                 robot_preview_camera: RobotPreviewCamera::default(),
                 sim_session: None,
                 sim_running: false,
-                sim_steps_per_frame: 40,
+                worker_preview: None,
+                replay_config: None,
+                auto_open_replay: false,
+                replay_time_s: 0.,
+                replay_speed: 1.,
+                replay_playing: false,
+                auxiliary_job: None,
+                replay_job: None,
                 sim_duration_s: 10.0,
                 last_sim_sample: None,
                 replay: None,
-                replay_index: 0,
-                replay_max_samples: 200_000,
+
+                replay_max_samples: 2048,
                 real_log_path_text: "examples/basic/real_log_demo.csv".to_string(),
                 calibration_csv_path_text: "examples/basic/comparacao_v05.csv".to_string(),
                 calibration_report_path_text: "examples/basic/comparacao_v05.txt".to_string(),
                 tuning_output_path_text: "examples/basic/ajuste_v05.json".to_string(),
                 last_calibration_metrics: None,
+                study_path: "target/stage10-fixture/study.json".into(),
+                study_report_path: "target/stage10-qualification.json".into(),
             };
             if Path::new(&app.project_path_text).exists() {
                 app.load_project_from_path(PathBuf::from(app.project_path_text.clone()));
@@ -322,6 +369,11 @@ mod gui {
                     self.sim_session = None;
                     self.last_sim_sample = None;
                     self.cfg = Some(cfg);
+                    self.track_history.clear();
+                    self.track_history_pending = None;
+                    self.robot_history.clear();
+                    self.robot_history_pending = None;
+                    self.robot_selection = None;
                     self.set_status("Projeto carregado com sucesso.");
                 }
                 Err(err) => self.set_status(format!("Falha ao carregar projeto: {err}")),
@@ -345,18 +397,16 @@ mod gui {
         }
 
         fn update_project_start_pose_from_track(cfg: &mut LoadedConfig) {
-            if let Some(parametric) = &cfg.track.parametric {
-                if let Some(start_pose) = resolve_robot_start_pose(parametric) {
-                    cfg.project.start_pose = Pose2::new(
-                        start_pose.x_mm / 1000.0,
-                        start_pose.y_mm / 1000.0,
-                        start_pose.heading_deg.to_radians(),
-                    );
-                }
+            if let Ok(pose) =
+                crate::track::definition::effective_start_pose(&cfg.track, cfg.project.start_pose)
+            {
+                cfg.project.start_pose = pose;
             }
         }
 
         fn reset_track_editor_state(&mut self) {
+            self.track_history.clear();
+            self.track_history_pending = None;
             self.selected_track_point = None;
             self.track_view_zoom = 1.0;
             self.track_view_pan_m = Vec2::new(0.0, 0.0);
@@ -580,152 +630,227 @@ mod gui {
         }
 
         fn reset_simulation(&mut self) {
-            let duration_us = Some((self.sim_duration_s.max(0.0) * 1_000_000.0).round() as u64);
-            match self.cfg.clone() {
-                Some(cfg) => match SimulationSession::new(cfg, duration_us) {
-                    Ok(session) => {
-                        self.last_sim_sample = Some(session.sample());
-                        self.sim_session = Some(session);
-                        self.sim_running = false;
-                        self.set_status("Simulador visual reiniciado.");
-                    }
-                    Err(err) => {
-                        self.set_status(format!("Falha ao iniciar simulação visual: {err}"))
-                    }
-                },
-                None => self.set_status("Carregue ou crie um projeto antes de simular."),
-            }
-        }
-
-        fn run_headless_replay(&mut self) {
             let Some(cfg) = self.cfg.clone() else {
-                self.set_status("Carregue um projeto antes de gerar replay.");
+                self.set_status("Carregue um projeto.");
                 return;
             };
-            let replay_path = default_replay_path(&cfg);
-            let csv_path = default_csv_path(&cfg);
-            let result = run_simulation(
+            let duration_us = match crate::core::clock::duration_seconds_to_us(self.sim_duration_s)
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    self.set_status(e);
+                    return;
+                }
+            };
+            let dir = PathBuf::from("target/runs").join(crate::sim::new_run_id());
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                self.set_status(e.to_string());
+                return;
+            }
+            self.sim_session = None;
+            self.worker_preview = None;
+            self.last_sim_sample = None;
+            self.sim_running = false;
+            self.auto_open_replay = false;
+            self.sim_session = Some(SimulationWorker::spawn(
                 cfg,
                 RunOptions {
-                    duration_us: Some((self.sim_duration_s.max(0.0) * 1_000_000.0).round() as u64),
-                    output_csv: Some(csv_path.clone()),
-                    output_replay: Some(replay_path.clone()),
+                    duration_us: Some(duration_us),
+                    output_csv: Some(dir.join("result.csv")),
+                    output_replay: Some(dir.join("result.rtlog")),
                     headless: true,
                     benchmark: false,
                     physics_dt_override_us: None,
                 },
-            );
-            match result {
-                Ok(summary) => {
-                    self.replay_path_text = replay_path.display().to_string();
-                    self.set_status(format!(
-                        "Replay gerado: {} amostras em {:.3}s simulados.",
-                        summary.steps, summary.simulated_time_s
-                    ));
-                }
-                Err(err) => self.set_status(format!("Falha ao gerar replay: {err}")),
+                1,
+                true,
+            ));
+            self.set_status("Execução preparada; configuração congelada em uma nova execução.");
+        }
+        fn run_headless_replay(&mut self) {
+            self.reset_simulation();
+            if let Some(w) = &self.sim_session {
+                w.control.resume();
+                self.sim_running = true;
+                self.auto_open_replay = true;
+                self.set_status("Calculando em segundo plano. O replay será aberto ao concluir.");
             }
         }
+        fn poll_simulation(&mut self, ctx: &egui::Context) {
+            if self.auxiliary_job.is_some() || self.replay_job.is_some() {
+                ctx.request_repaint_after(std::time::Duration::from_millis(16));
+            }
+            if let Some(result) = self.auxiliary_job.as_ref().and_then(|j| j.take_result()) {
+                self.auxiliary_job = None;
+                match result {
+                    Ok((text, metrics)) => {
+                        if metrics.is_some() {
+                            self.last_calibration_metrics = metrics;
+                        }
+                        self.set_status(text);
+                    }
+                    Err(e) => self.set_status(e),
+                }
+            }
+            if let Some(result) = self.replay_job.as_ref().and_then(|j| j.take_result()) {
+                self.replay_job = None;
+                match result {
+                    Ok((r, config)) => {
+                        let count = r.samples;
+                        self.replay_config = config;
+                        self.replay = Some(r);
+                        self.replay_time_s = 0.;
+                        self.replay_playing = false;
+                        self.view = AppView::ReplayViewer;
+                        self.set_status(format!(
+                            "Replay indexado: {count} amostras, leitura sob demanda."
+                        ));
+                    }
+                    Err(e) => self.set_status(format!("Falha ao abrir replay: {e}")),
+                }
+            }
 
+            if let Some(w) = &self.sim_session {
+                if let Some(p) = w.control.latest() {
+                    self.last_sim_sample = Some(p.sample.clone());
+                    self.worker_preview = Some(p);
+                }
+                if !w.is_finished() {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(16));
+                }
+            }
+            let result = self.sim_session.as_ref().and_then(|w| w.take_result());
+            if let Some(result) = result {
+                self.sim_running = false;
+                match result {
+                    Ok(summary) => {
+                        self.set_status(format!(
+                            "Execução {}: {} | {} passos",
+                            summary.run_id, summary.termination_reason, summary.steps
+                        ));
+                        if let Some(path) = summary.replay_path {
+                            self.replay_path_text = path.display().to_string();
+                            if self.auto_open_replay {
+                                self.load_replay();
+                            }
+                        }
+                    }
+                    Err(e) => self.set_status(format!("Falha no cálculo: {e}")),
+                }
+            }
+        }
         fn load_replay(&mut self) {
+            if self.replay_job.is_some() {
+                self.set_status("Aguarde a abertura do replay em andamento.");
+                return;
+            }
             let path = PathBuf::from(self.replay_path_text.trim());
-            match load_replay_samples(&path, self.replay_max_samples) {
-                Ok(replay) => {
-                    let count = replay.samples.len();
-                    self.replay = Some(replay);
-                    self.replay_index = 0;
-                    self.view = AppView::ReplayViewer;
-                    self.set_status(format!("Replay carregado com {count} amostras."));
-                }
-                Err(err) => self.set_status(format!("Falha ao carregar replay: {err}")),
-            }
+            let budget = self.replay_max_samples.max(128) * 1024;
+            self.replay_job = Some(crate::experiments::jobs::BackgroundJob::spawn(move || {
+                let replay =
+                    crate::replay::IndexedReplay::open(&path, budget).map_err(|e| e.to_string())?;
+                let config = if replay.legacy {
+                    None
+                } else {
+                    let metadata =
+                        crate::json::parse_json(&replay.metadata).map_err(|e| e.to_string())?;
+                    metadata
+                        .get("experiment")
+                        .map(crate::config::config_from_snapshot)
+                        .transpose()?
+                };
+                crate::experiments::jobs::check_cancelled()?;
+                Ok((replay, config))
+            }));
         }
-
+        fn start_auxiliary(
+            &mut self,
+            f: impl FnOnce() -> Result<(String, Option<ComparisonMetrics>), String> + Send + 'static,
+        ) {
+            if self.auxiliary_job.is_some() {
+                self.set_status("Uma operação já está em andamento; aguarde ou cancele.");
+                return;
+            }
+            self.auxiliary_job = Some(crate::experiments::jobs::BackgroundJob::spawn(f));
+            self.set_status("Executando em segundo plano...");
+        }
         fn export_current_replay_to_csv(&mut self) {
-            let replay_path = PathBuf::from(self.replay_path_text.trim());
-            let csv_path = replay_path.with_extension("csv");
-            match export_replay_to_csv(&replay_path, &csv_path) {
-                Ok(rows) => self.set_status(format!(
-                    "Replay exportado para {} com {rows} linhas.",
-                    csv_path.display()
-                )),
-                Err(err) => self.set_status(format!("Falha ao exportar replay: {err}")),
-            }
+            let input = PathBuf::from(self.replay_path_text.trim());
+            let output = input.with_extension("csv");
+            self.start_auxiliary(move || {
+                let rows = export_replay_to_csv(&input, &output).map_err(|e| e.to_string())?;
+                Ok((
+                    format!("Exportadas {rows} amostras para {}", output.display()),
+                    None,
+                ))
+            });
         }
-
         fn import_real_log_ui(&mut self) {
             let input = PathBuf::from(self.real_log_path_text.trim());
             let output = PathBuf::from(self.calibration_csv_path_text.trim())
                 .with_file_name("real_normalized_v05.csv");
-            match import_real_log(&input).and_then(|log| {
-                write_normalized_real_log(&log, &output)
-                    .map_err(|e| format!("Falha ao salvar log normalizado: {e}"))?;
-                Ok((log.samples.len(), log.sensor_count))
-            }) {
-                Ok((samples, sensors)) => self.set_status(format!(
-                    "Log real importado: {samples} amostras, {sensors} sensores. Normalizado em {}.",
-                    output.display()
-                )),
-                Err(err) => self.set_status(format!("Falha ao importar log real: {err}")),
-            }
+            self.start_auxiliary(move || {
+                let log = import_real_log(&input)?;
+                crate::experiments::jobs::write_output_atomic(&output, |p| {
+                    write_normalized_real_log(&log, p).map_err(|e| e.to_string())
+                })?;
+                Ok((
+                    format!(
+                        "Importadas {} amostras em {}",
+                        log.samples.len(),
+                        output.display()
+                    ),
+                    None,
+                ))
+            });
         }
-
         fn compare_real_log_ui(&mut self) {
             let Some(cfg) = self.cfg.clone() else {
-                self.set_status("Carregue um projeto antes de comparar com log real.");
+                self.set_status("Carregue um projeto.");
                 return;
             };
-            let real_path = PathBuf::from(self.real_log_path_text.trim());
-            let csv_path = PathBuf::from(self.calibration_csv_path_text.trim());
-            let report_path = PathBuf::from(self.calibration_report_path_text.trim());
-            let result = import_real_log(&real_path).and_then(|real| {
-                let report = compare_project_with_real(cfg, &real, None)?;
-                write_comparison_csv(&report, &csv_path)
-                    .map_err(|e| format!("Falha ao salvar CSV de comparação: {e}"))?;
-                write_comparison_report(&report, &report_path)
-                    .map_err(|e| format!("Falha ao salvar relatório: {e}"))?;
-                Ok(report.metrics)
+            let input = PathBuf::from(self.real_log_path_text.trim());
+            let csv = PathBuf::from(self.calibration_csv_path_text.trim());
+            let output = PathBuf::from(self.calibration_report_path_text.trim());
+            self.start_auxiliary(move || {
+                let log = import_real_log(&input)?;
+                let report = compare_project_with_real(cfg, &log, None)?;
+                crate::experiments::jobs::write_output_atomic(&csv, |p| {
+                    write_comparison_csv(&report, p).map_err(|e| e.to_string())
+                })?;
+                crate::experiments::jobs::write_output_atomic(&output, |p| {
+                    write_comparison_report(&report, p).map_err(|e| e.to_string())
+                })?;
+                Ok((
+                    format!(
+                        "Comparação concluída; erro RMS de trajetória {:.4} m",
+                        report.metrics.trajectory_error_m.rms
+                    ),
+                    Some(report.metrics),
+                ))
             });
-            match result {
-                Ok(metrics) => {
-                    self.last_calibration_metrics = Some(metrics.clone());
-                    self.set_status(format!(
-                        "Comparação concluída: erro RMS trajetória {:.4} m, velocidade {:.4} m/s, sensores {:.2} ADC.",
-                        metrics.trajectory_error_m.rms,
-                        metrics.speed_error_m_s.rms,
-                        metrics.sensor_error_adc.rms
-                    ));
-                }
-                Err(err) => self.set_status(format!("Falha na comparação: {err}")),
-            }
         }
-
         fn tune_real_log_ui(&mut self) {
             let Some(cfg) = self.cfg.clone() else {
-                self.set_status("Carregue um projeto antes de ajustar parâmetros.");
+                self.set_status("Carregue um projeto.");
                 return;
             };
-            let real_path = PathBuf::from(self.real_log_path_text.trim());
+            let input = PathBuf::from(self.real_log_path_text.trim());
             let output = PathBuf::from(self.tuning_output_path_text.trim());
-            let result = import_real_log(&real_path).and_then(|real| {
-                let report = tune_project_against_real(cfg, &real, None)?;
-                write_tuning_report(&report, &output)
-                    .map_err(|e| format!("Falha ao salvar ajuste: {e}"))?;
-                Ok(report)
+            self.start_auxiliary(move || {
+                let log = import_real_log(&input)?;
+                let report = tune_project_against_real(cfg, &log, None)?;
+                crate::experiments::jobs::write_output_atomic(&output, |p| {
+                    write_tuning_report(&report, p).map_err(|e| e.to_string())
+                })?;
+                Ok((
+                    format!(
+                        "Ajuste concluído; score {:.5} -> {:.5}",
+                        report.baseline.score, report.best.metrics.score
+                    ),
+                    Some(report.best.metrics),
+                ))
             });
-            match result {
-                Ok(report) => {
-                    self.last_calibration_metrics = Some(report.best.metrics.clone());
-                    self.set_status(format!(
-                        "Ajuste concluído: score {:.5} -> {:.5}, μ={:.3}, escala torque={:.3}.",
-                        report.baseline.score,
-                        report.best.metrics.score,
-                        report.best.mu_longitudinal,
-                        report.best.stall_torque_scale
-                    ));
-                }
-                Err(err) => self.set_status(format!("Falha no ajuste de parâmetros: {err}")),
-            }
         }
 
         fn sidebar(&mut self, ctx: &egui::Context) {
@@ -734,6 +859,16 @@ mod gui {
                 .default_width(190.0)
                 .show(ctx, |ui| {
                     ui.heading("RTSim v0.09");
+                    if (self.auxiliary_job.is_some() || self.replay_job.is_some())
+                        && ui.button("Cancelar operação").clicked()
+                    {
+                        if let Some(j) = &self.auxiliary_job {
+                            j.cancel();
+                        }
+                        if let Some(j) = &self.replay_job {
+                            j.cancel();
+                        }
+                    }
                     ui.separator();
                     nav_button(ui, &mut self.view, AppView::Home, "Home");
                     nav_button(ui, &mut self.view, AppView::TrackEditor, "Track Editor");
@@ -749,7 +884,7 @@ mod gui {
                         ui,
                         &mut self.view,
                         AppView::CalibrationTools,
-                        "Calibração v0.5",
+                        "Calibração atual",
                     );
                     ui.separator();
                     if ui.button("Save").clicked() {
@@ -788,6 +923,11 @@ mod gui {
                 }
                 if ui.button("Novo projeto em memória").clicked() {
                     self.cfg = Some(default_loaded_config(PathBuf::from("projeto_v05.rtsim")));
+                    self.track_history.clear();
+                    self.track_history_pending = None;
+                    self.robot_history.clear();
+                    self.robot_history_pending = None;
+                    self.robot_selection = None;
                     self.project_path_text = "projeto_v05.rtsim".to_string();
                     self.track_file_path_text = "track.json".to_string();
                     self.surface_profile_path_text =
@@ -797,7 +937,7 @@ mod gui {
                     self.sim_session = None;
                     self.last_sim_sample = None;
                     self.set_status(
-                        "Novo projeto v0.5 criado em memória. Ajuste e salve quando quiser.",
+                        "Novo projeto atual criado em memória. Ajuste e salve quando quiser.",
                     );
                 }
                 if ui.button("Salvar").clicked() {
@@ -851,7 +991,7 @@ mod gui {
                     if ui.button("Abrir replay viewer").clicked() {
                         self.view = AppView::ReplayViewer;
                     }
-                    if ui.button("Abrir calibração v0.5").clicked() {
+                    if ui.button("Abrir calibração atual").clicked() {
                         self.view = AppView::CalibrationTools;
                     }
                 });
@@ -864,7 +1004,28 @@ mod gui {
         }
 
         fn show_track_editor(&mut self, ui: &mut egui::Ui) {
-            let mut invalidate_sim = false;
+            let before = self
+                .cfg
+                .as_ref()
+                .map(|c| (c.track.clone(), c.project.start_pose));
+            let mut history_action = false;
+            ui.horizontal(|ui| {
+                if let Some(cfg) = self.cfg.as_mut() {
+                    if ui.button("Desfazer pista").clicked() {
+                        if let Some(old) = self.track_history_pending.take() {
+                            self.track_history.record(old, cfg);
+                        }
+                        history_action = self.track_history.undo(cfg);
+                    }
+                    if ui.button("Refazer pista").clicked() {
+                        if let Some(old) = self.track_history_pending.take() {
+                            self.track_history.record(old, cfg);
+                        }
+                        history_action = self.track_history.redo(cfg);
+                    }
+                }
+            });
+            let mut invalidate_sim = history_action;
             let mut status_to_set: Option<String> = None;
             let mut selected_track_point = self.selected_track_point;
             let mut track_view_zoom = self.track_view_zoom;
@@ -873,12 +1034,13 @@ mod gui {
             let mut surface_profile_path_text = self.surface_profile_path_text.clone();
             let mut track_file_command = TrackFileCommand::None;
             let mut surface_profile_command = SurfaceProfileCommand::None;
-            let mut local_track_dirty = self.track_dirty;
+            let mut local_track_dirty = self.track_dirty || history_action;
             let mut local_surface_profile_dirty = self.surface_profile_dirty;
 
             if let Some(cfg) = self.cfg.as_mut() {
                 let preview_track = cfg.track.clone();
-                let preview_geometry = cfg.track.parametric.as_ref().map(build_geometry);
+                let preview_runtime = cached_track(ui.ctx(), &cfg.track).ok();
+                let preview_geometry = preview_runtime.as_ref().and_then(|r| r.geometry());
                 let full_size = ui.available_size_before_wrap();
                 let total_width = full_size.x;
                 let total_height = full_size.y.max(360.0);
@@ -965,6 +1127,7 @@ mod gui {
                                     canvas_height,
                                     &mut track_view_zoom,
                                     &mut track_view_pan_m,
+                                    None,
                                 );
                             },
                         );
@@ -995,6 +1158,11 @@ mod gui {
                                             local_surface_profile_dirty,
                                             &mut surface_profile_command,
                                         );
+                                        panel_changes.track_changed |= edit_track_environment(
+                                            ui,
+                                            &mut cfg.track,
+                                            &mut cfg.project.start_pose,
+                                        );
                                     });
                             },
                         );
@@ -1019,6 +1187,20 @@ mod gui {
                 );
             }
 
+            if let (Some(before), Some(cfg)) = (before, self.cfg.as_ref()) {
+                if !history_action
+                    && (track_json(&before.0) != track_json(&cfg.track)
+                        || before.1 != cfg.project.start_pose)
+                    && self.track_history_pending.is_none()
+                {
+                    self.track_history_pending = Some(before);
+                }
+                if !ui.input(|i| i.pointer.any_down()) && !ui.ctx().wants_keyboard_input() {
+                    if let Some(old) = self.track_history_pending.take() {
+                        self.track_history.record(old, cfg);
+                    }
+                }
+            }
             self.selected_track_point = selected_track_point;
             self.track_view_zoom = track_view_zoom;
             self.track_view_pan_m = track_view_pan_m;
@@ -1043,6 +1225,13 @@ mod gui {
                 TrackFileCommand::SaveAs => self.save_track_asset(true),
             }
 
+            let profile_before = if surface_profile_command != SurfaceProfileCommand::None {
+                self.cfg
+                    .as_ref()
+                    .map(|c| (c.track.clone(), c.project.start_pose))
+            } else {
+                None
+            };
             match surface_profile_command {
                 SurfaceProfileCommand::None => {}
                 SurfaceProfileCommand::New => self.create_new_surface_profile(),
@@ -1050,12 +1239,36 @@ mod gui {
                 SurfaceProfileCommand::Save => self.save_surface_profile_asset(false),
                 SurfaceProfileCommand::SaveAs => self.save_surface_profile_asset(true),
             }
+            if let (Some(before), Some(cfg)) = (profile_before, self.cfg.as_ref()) {
+                if let Some(pending) = self.track_history_pending.take() {
+                    self.track_history.record(pending, cfg);
+                }
+                self.track_history.record(before, cfg);
+            }
         }
 
         fn show_robot_editor(&mut self, ui: &mut egui::Ui) {
+            let robot_before = self.cfg.as_ref().map(|c| c.robot.clone());
+            let mut history_action = false;
+            ui.horizontal(|ui| {
+                if let Some(cfg) = self.cfg.as_mut() {
+                    if ui.button("Desfazer").clicked() {
+                        if let Some(before) = self.robot_history_pending.take() {
+                            self.robot_history.record(before, &cfg.robot);
+                        }
+                        history_action = self.robot_history.undo(&mut cfg.robot);
+                    }
+                    if ui.button("Refazer").clicked() {
+                        if let Some(before) = self.robot_history_pending.take() {
+                            self.robot_history.record(before, &cfg.robot);
+                        }
+                        history_action = self.robot_history.redo(&mut cfg.robot);
+                    }
+                }
+            });
             let mut robot_file_command = RobotFileCommand::None;
             let mut component_asset_command: Option<ComponentAssetCommand> = None;
-            let mut invalidate_sim = false;
+            let mut invalidate_sim = history_action;
             let mut status_to_set: Option<String> = None;
             let mut robot_dirty = self.robot_dirty;
             let mut robot_file_path_text = self.robot_file_path_text.clone();
@@ -1079,7 +1292,7 @@ mod gui {
                 let left_width =
                     (total_width - right_width - robot_to_panel_gap - right_window_margin)
                         .max(300.0);
-                let preview_robot = cfg.robot.clone();
+
                 let project_path_for_assets = cfg.project_path.clone();
 
                 ui.allocate_ui_with_layout(
@@ -1100,9 +1313,10 @@ mod gui {
                                 let preview_height = ui.available_height().max(320.0);
                                 draw_robot_preview(
                                     ui,
-                                    &preview_robot,
+                                    &mut cfg.robot,
                                     preview_height,
                                     &mut robot_preview_camera,
+                                    &mut self.robot_selection,
                                 );
                             },
                         );
@@ -1119,6 +1333,11 @@ mod gui {
                                     .id_source("robot_editor_right_panel_scroll")
                                     .max_height(total_height)
                                     .show(ui, |ui| {
+                                        let assembly_changed = edit_assembly_panel(
+                                            ui,
+                                            &mut cfg.robot,
+                                            &mut self.robot_selection,
+                                        );
                                         let changed = edit_robot_properties_panel(
                                             ui,
                                             &mut cfg.robot,
@@ -1137,7 +1356,7 @@ mod gui {
                                             &mut component_asset_command,
                                             &mut status_to_set,
                                         );
-                                        if changed {
+                                        if changed || assembly_changed {
                                             robot_dirty = true;
                                             invalidate_sim = true;
                                         }
@@ -1155,6 +1374,23 @@ mod gui {
                 );
             }
 
+            if let (Some(before), Some(cfg)) = (robot_before, self.cfg.as_ref()) {
+                if !history_action && robot_json(&before) != robot_json(&cfg.robot) {
+                    robot_dirty = true;
+                    invalidate_sim = true;
+                    if self.robot_history_pending.is_none() {
+                        self.robot_history_pending = Some(before);
+                    }
+                }
+                if !ui.input(|i| i.pointer.any_down()) && !ui.ctx().wants_keyboard_input() {
+                    if let Some(before) = self.robot_history_pending.take() {
+                        self.robot_history.record(before, &cfg.robot);
+                    }
+                }
+            }
+            if history_action {
+                robot_dirty = true;
+            }
             self.robot_file_path_text = robot_file_path_text;
             self.motor_left_asset_path_text = motor_left_asset_path_text;
             self.driver_asset_path_text = driver_asset_path_text;
@@ -1210,6 +1446,9 @@ mod gui {
             self.robot_dirty = true;
             self.sim_session = None;
             self.last_sim_sample = None;
+            self.robot_history.clear();
+            self.robot_history_pending = None;
+            self.robot_selection = None;
             self.set_status("New robot created.");
         }
 
@@ -1241,6 +1480,11 @@ mod gui {
                     }
                     self.robot_file_path_text = Self::path_text(&path);
                     self.robot_dirty = false;
+                    self.track_history.clear();
+                    self.track_history_pending = None;
+                    self.robot_history.clear();
+                    self.robot_history_pending = None;
+                    self.robot_selection = None;
                     self.selected_fan_asset_index = 0;
                     self.sim_session = None;
                     self.last_sim_sample = None;
@@ -1282,11 +1526,20 @@ mod gui {
         }
 
         fn handle_component_asset_command(&mut self, command: ComponentAssetCommand) {
+            if let (Some(before), Some(cfg)) =
+                (self.robot_history_pending.take(), self.cfg.as_ref())
+            {
+                self.robot_history.record(before, &cfg.robot);
+            }
+            let before = self.cfg.as_ref().map(|c| c.robot.clone());
             match command.command {
                 ComponentAssetCommandKind::New => self.create_new_component_asset(command.kind),
                 ComponentAssetCommandKind::Load => self.load_component_asset(command.kind),
                 ComponentAssetCommandKind::Save => self.save_component_asset(command.kind, false),
                 ComponentAssetCommandKind::SaveAs => self.save_component_asset(command.kind, true),
+            }
+            if let (Some(before), Some(cfg)) = (before, self.cfg.as_ref()) {
+                self.robot_history.record(before, &cfg.robot);
             }
         }
 
@@ -1310,7 +1563,6 @@ mod gui {
                 match kind {
                     ComponentAssetKind::MotorLeft => {
                         cfg.robot.motor_left = default_motor();
-                        cfg.robot.motor_right = cfg.robot.motor_left.clone();
                     }
                     ComponentAssetKind::Driver => {
                         cfg.robot.driver = DriverConfig {
@@ -1369,18 +1621,13 @@ mod gui {
                         } else {
                             for instance in &mut cfg.robot.normal_force.fans {
                                 let position = instance.position_m;
+                                let id = instance.id.clone();
                                 *instance = fan.clone();
                                 instance.position_m = position;
+                                instance.id = id;
                             }
                         }
-                        cfg.robot.normal_force.model = "FanDownforce".to_string();
-                        cfg.robot.normal_force.model_kind = DownforceModel::Fan {
-                            nominal_voltage_v: cfg.robot.battery.nominal_voltage_v,
-                            nominal_current_a: 0.7,
-                            max_force_n: 0.5,
-                            curve: FanCurveModel::LookupTable,
-                            response_time_s: 0.03,
-                        };
+                        cfg.robot.normal_force.model = crate::io::models::NormalForceKind::Fan;
                     }
                 }
                 Ok("New default component asset created in the editor. Use Save or Save As to persist it.".to_string())
@@ -1413,7 +1660,6 @@ mod gui {
                 match kind {
                     ComponentAssetKind::MotorLeft => {
                         cfg.robot.motor_left = load_motor_profile_from_file(&path)?.motor;
-                        cfg.robot.motor_right = cfg.robot.motor_left.clone();
                     }
                     ComponentAssetKind::Driver => {
                         cfg.robot.driver = load_driver_profile_from_file(&path)?.driver;
@@ -1438,18 +1684,13 @@ mod gui {
                         } else {
                             for instance in &mut cfg.robot.normal_force.fans {
                                 let position = instance.position_m;
+                                let id = instance.id.clone();
                                 *instance = fan.clone();
                                 instance.position_m = position;
+                                instance.id = id;
                             }
                         }
-                        cfg.robot.normal_force.model = "FanDownforce".to_string();
-                        cfg.robot.normal_force.model_kind = DownforceModel::Fan {
-                            nominal_voltage_v: fan.nominal_voltage_v,
-                            nominal_current_a: fan.nominal_current_a,
-                            max_force_n: fan.max_force_n,
-                            curve: fan.curve_model,
-                            response_time_s: fan.response_time_s,
-                        };
+                        cfg.robot.normal_force.model = crate::io::models::NormalForceKind::Fan;
                     }
                 }
                 Ok(format!("Component loaded from {}", Self::path_text(&path)))
@@ -1565,179 +1806,203 @@ mod gui {
             }
         }
 
-        fn show_visual_simulator(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-            ui.heading("Simulador visual");
+        fn show_visual_simulator(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
+            ui.heading("Simulador");
             ui.horizontal(|ui| {
-                ui.label("Duração [s]");
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut self.sim_duration_s)
-                            .speed(0.1)
-                            .clamp_range(0.0..=3600.0),
-                    )
-                    .changed()
-                {
-                    if let Some(cfg) = self.cfg.as_mut() {
-                        cfg.project.duration_s = self.sim_duration_s;
-                    }
-                    self.sim_session = None;
-                    self.last_sim_sample = None;
-                }
-                ui.label("Passos por frame");
-                ui.add(
-                    egui::DragValue::new(&mut self.sim_steps_per_frame)
-                        .speed(1.0)
-                        .clamp_range(1.0..=20_000.0),
-                );
-                if ui.button("Reset").clicked() {
+                ui.label("Duração (s)");
+                ui.add(egui::DragValue::new(&mut self.sim_duration_s).clamp_range(0.0..=3600.));
+                if ui.button("Nova execução").clicked() {
                     self.reset_simulation();
                 }
                 if ui
-                    .button(if self.sim_running { "Pausar" } else { "Play" })
+                    .button(if self.sim_running {
+                        "Pausar cálculo"
+                    } else {
+                        "Iniciar / retomar"
+                    })
                     .clicked()
                 {
+                    if self.sim_session.as_ref().is_none_or(|w| w.is_finished()) {
+                        self.reset_simulation();
+                    }
+                    if let Some(w) = &self.sim_session {
+                        if self.sim_running {
+                            w.control.pause();
+                        } else {
+                            w.control.resume();
+                        }
+                        self.sim_running = !self.sim_running;
+                    }
+                }
+                if ui.button("Um passo").clicked() {
                     if self.sim_session.is_none() {
                         self.reset_simulation();
                     }
-                    self.sim_running = !self.sim_running;
-                }
-                if ui.button("Step").clicked() {
-                    if self.sim_session.is_none() {
-                        self.reset_simulation();
-                    }
-                    if let Some(session) = self.sim_session.as_mut() {
-                        self.last_sim_sample = Some(session.advance_steps(1));
-                    }
-                }
-                if ui.button("Gerar replay headless").clicked() {
-                    self.run_headless_replay();
-                }
-            });
-
-            if self.sim_running {
-                if self.sim_session.is_none() {
-                    self.reset_simulation();
-                }
-                if let Some(session) = self.sim_session.as_mut() {
-                    self.last_sim_sample = Some(session.advance_steps(self.sim_steps_per_frame));
-                    if session.is_finished() {
+                    if let Some(w) = &self.sim_session {
+                        w.control.step(1);
                         self.sim_running = false;
                     }
                 }
-                ctx.request_repaint();
+                if ui.button("Cancelar").clicked() {
+                    if let Some(w) = &self.sim_session {
+                        w.control.cancel();
+                    }
+                }
+                if ui.button("Calcular e reproduzir").clicked() {
+                    self.run_headless_replay();
+                }
+            });
+            if let Some(w) = &self.sim_session {
+                ui.label(format!(
+                    "Execução congelada: {} | frames visuais descartados: {}",
+                    w.run_id,
+                    w.control.dropped_frames()
+                ));
             }
-
-            let progress = self
+            if let Some(p) = &self.worker_preview {
+                ui.add(egui::ProgressBar::new(p.progress as f32).show_percentage());
+                ui.label(format!("{} passos | {}", p.steps, p.reason));
+                egui::CollapsingHeader::new("Sensores e estimativa").show(ui, |ui| {
+                    for r in &p.sensors.channels {
+                        ui.label(format!(
+                            "{}: ADC {} | válida {} | idade {} µs",
+                            r.id, r.adc, r.valid, r.age_us
+                        ));
+                    }
+                    ui.label(format!(
+                        "Odometria: {:.3}, {:.3} m | yaw {:.3} rad",
+                        p.estimate.pose.x, p.estimate.pose.y, p.estimate.pose.yaw
+                    ));
+                });
+            }
+            if let Some(p) = &self.worker_preview {
+                egui::CollapsingHeader::new("Contatos e alimentacao").show(ui,|ui|{for (i,w) in p.contacts.wheels.iter().enumerate(){ui.label(format!("Roda {}: N {:.3} N | F longitudinal {:.3} N | lateral {:.3} N | slip {:.3} | {}",i,w.normal_n,w.force_long_n,w.force_lat_n,w.slip,w.regime));}if let Some(power)=&p.power{ui.label(format!("Barramento {:.3} V | {:.3} A | carga {:.1}% | iteracoes {} | residuo {:.6} V",power.voltage,power.current,power.soc*100.,power.iterations,power.residual));}});
+            }
+            if let Some(cfg) = self
                 .sim_session
                 .as_ref()
-                .map(|s| s.progress())
-                .unwrap_or(0.0) as f32;
-            ui.add(egui::ProgressBar::new(progress).show_percentage());
-            if let Some(session) = self.sim_session.as_ref() {
-                let (text, color) = if session.robot_over_line() {
-                    (
-                        "Robot over line: valid",
-                        egui::Color32::from_rgb(80, 190, 110),
-                    )
-                } else {
-                    (
-                        "Robot over line: invalid",
-                        egui::Color32::from_rgb(230, 85, 75),
-                    )
-                };
-                ui.colored_label(color, text);
-            }
-
-            ui.separator();
-            if let Some(cfg) = &self.cfg {
-                let sample = self
-                    .sim_session
-                    .as_ref()
-                    .map(|s| s.sample())
-                    .or_else(|| self.last_sim_sample.clone());
-                let robot_pose = sample.as_ref().map(|s| Pose2::new(s.x_m, s.y_m, s.yaw_rad));
-                draw_track_view(ui, &cfg.track, robot_pose, &[]);
-                if let Some(sample) = sample {
-                    telemetry_panel(ui, &sample);
-                } else {
-                    ui.label("Pressione Reset ou Play para iniciar a sessão visual.");
-                }
-            } else {
-                ui.colored_label(
-                    egui::Color32::from_rgb(170, 95, 0),
-                    "Carregue um projeto antes de simular.",
+                .map(|w| &w.config)
+                .or(self.cfg.as_ref())
+            {
+                let sample = self.last_sim_sample.as_ref();
+                draw_track_view_with_height_zoomable(
+                    ui,
+                    &cfg.track,
+                    sample.map(|s| Pose2::new(s.x_m, s.y_m, s.yaw_rad)),
+                    &[],
+                    440.,
+                    &mut self.track_view_zoom,
+                    &mut self.track_view_pan_m,
+                    Some(&cfg.robot),
                 );
+                if let Some(s) = sample {
+                    telemetry_panel(ui, s);
+                }
             }
         }
-
         fn show_replay_viewer(&mut self, ui: &mut egui::Ui) {
-            ui.heading("Replay viewer");
+            ui.heading("Reprodução do cálculo");
+            ui.text_edit_singleline(&mut self.replay_path_text);
             ui.horizontal(|ui| {
-                ui.label("Replay .rtlog");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.replay_path_text)
-                        .desired_width(f32::INFINITY),
-                );
-            });
-            ui.horizontal(|ui| {
-                ui.label("Máx. amostras");
-                ui.add(
-                    egui::DragValue::new(&mut self.replay_max_samples)
-                        .clamp_range(1.0..=2_000_000.0),
-                );
-                if ui.button("Carregar replay").clicked() {
+                ui.label("Cache (KiB)");
+                ui.add(egui::DragValue::new(&mut self.replay_max_samples).clamp_range(128..=16384));
+                if ui.button("Abrir").clicked() {
                     self.load_replay();
                 }
                 if ui.button("Exportar CSV").clicked() {
                     self.export_current_replay_to_csv();
                 }
-                if ui.button("Gerar replay da simulação atual").clicked() {
+                if ui.button("Calcular e abrir").clicked() {
                     self.run_headless_replay();
                 }
             });
-            ui.separator();
-
-            if let Some(replay) = &self.replay {
-                if !replay.samples.is_empty() {
-                    let max_idx = replay.samples.len() - 1;
-                    self.replay_index = self.replay_index.min(max_idx);
-                    ui.add(egui::Slider::new(&mut self.replay_index, 0..=max_idx).text("amostra"));
-                    let sample = replay.samples[self.replay_index].clone();
-                    ui.label(format!(
-                        "Amostra {}/{} | t = {:.6} s | sensores = {}",
-                        self.replay_index + 1,
-                        replay.samples.len(),
-                        sample.t_us as f64 / 1_000_000.0,
-                        replay.sensor_count
-                    ));
-                    if let Some(cfg) = &self.cfg {
-                        draw_track_view(
-                            ui,
-                            &cfg.track,
-                            Some(Pose2::new(sample.x_m, sample.y_m, sample.yaw_rad)),
-                            &replay.samples[..=self.replay_index],
-                        );
-                    } else {
-                        draw_replay_path_only(
-                            ui,
-                            &replay.samples[..=self.replay_index],
-                            Some(&sample),
-                        );
+            if let Some(r) = &mut self.replay {
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(if self.replay_playing {
+                            "Pausar reprodução"
+                        } else {
+                            "Reproduzir"
+                        })
+                        .clicked()
+                    {
+                        self.replay_playing = !self.replay_playing;
                     }
-                    telemetry_panel(ui, &sample);
-                } else {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(170, 95, 0),
-                        "Replay carregado sem amostras.",
-                    );
+                    ui.label("Velocidade");
+                    ui.add(egui::DragValue::new(&mut self.replay_speed).clamp_range(0.01..=100.));
+                });
+                let duration = r.duration_us as f64 * 1e-6;
+                if self.replay_playing {
+                    self.replay_time_s = (self.replay_time_s
+                        + ui.input(|i| i.stable_dt) as f64 * self.replay_speed)
+                        .min(duration);
+                    ui.ctx().request_repaint();
+                    if self.replay_time_s >= duration {
+                        self.replay_playing = false;
+                    }
                 }
-            } else {
-                ui.label("Carregue um arquivo .rtlog para visualizar a trajetória e a telemetria.");
+                ui.add(
+                    egui::Slider::new(&mut self.replay_time_s, 0.0..=duration).text("tempo (s)"),
+                );
+                ui.label(format!(
+                    "{} amostras | {} | cache {} bytes",
+                    r.samples,
+                    r.termination,
+                    r.cached_bytes()
+                ));
+                match r.at_time((self.replay_time_s * 1e6).round() as u64, true) {
+                    Ok(sample) => {
+                        if let Some(cfg) = &self.replay_config {
+                            draw_track_view(
+                                ui,
+                                &cfg.track,
+                                Some(Pose2::new(sample.x_m, sample.y_m, sample.yaw_rad)),
+                                &[],
+                            );
+                        } else {
+                            draw_replay_path_only(ui, std::slice::from_ref(&sample), Some(&sample));
+                        }
+                        telemetry_panel(ui, &sample);
+                    }
+                    Err(e) => {
+                        self.replay_playing = false;
+                        ui.colored_label(egui::Color32::RED, e.to_string());
+                    }
+                }
             }
         }
 
+        fn show_qualification_tools(&mut self, ui: &mut egui::Ui) {
+            ui.group(|ui|{
+                ui.heading("Estudo versionado e validação independente");
+                ui.label("Manifesto JSON");ui.text_edit_singleline(&mut self.study_path);
+                ui.label("Relatório JSON");ui.text_edit_singleline(&mut self.study_report_path);
+                if ui.button("Executar estudo").clicked(){
+                    let source=PathBuf::from(self.study_path.trim());let output=PathBuf::from(self.study_report_path.trim());
+                    self.start_auxiliary(move||{
+                        let report=crate::experiments::calibration::qualify(&source,&output)?;
+                        let status=report.get("status").and_then(crate::json::JsonValue::as_str).unwrap_or("unknown");
+                        let label=match status {"synthetic_or_unknown_not_physically_qualified"=>"Verificação concluída; dados sintéticos ou sem proveniência não qualificam a física", "measured_criteria_passed_review_required"=>"Critérios atendidos; revisão experimental necessária", "identifiability_screen_failed"=>"Dados insuficientes para distinguir os parâmetros", _=>"Critérios de validação não atendidos"};
+                        Ok((format!("{label}. Relatório: {}",output.display()),None))
+                    });
+                }
+                if ui.button("Avaliar passos, seeds e perturbações").clicked(){
+                    if let Some(config)=self.cfg.clone(){
+                        let output=PathBuf::from(self.study_report_path.trim());
+                        self.start_auxiliary(move||{
+                            crate::experiments::robustness::run_config(config,&output,100000)?;
+                            Ok((format!("Robustez numérica salva em {}",output.display()),None))
+                        });
+                    }
+                }
+                ui.label("Dados sintéticos verificam o software. A qualificação física exige medições com proveniência.");
+                ui.label("As ferramentas legadas abaixo não substituem o estudo versionado.");
+            });
+        }
+
         fn show_calibration_tools(&mut self, ui: &mut egui::Ui) {
-            ui.heading("Calibração v0.5 — comparação com dados reais");
+            ui.heading("Calibração atual — comparação com dados reais");
+            self.show_qualification_tools(ui);
             ui.label("Importe um CSV de log real, alinhe pelo tempo e compare trajetória, sensores e velocidade contra a simulação determinística do projeto carregado.");
             ui.separator();
 
@@ -3347,6 +3612,7 @@ mod gui {
 
     impl eframe::App for RTSimApp {
         fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+            self.poll_simulation(ctx);
             self.sidebar(ctx);
             egui::TopBottomPanel::bottom("bottom_status").show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -3365,2654 +3631,6 @@ mod gui {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn edit_robot_properties_panel(
-        ui: &mut egui::Ui,
-        robot: &mut RobotConfig,
-        robot_file_path_text: &mut String,
-        robot_dirty: bool,
-        robot_file_command: &mut RobotFileCommand,
-        motor_left_asset_path_text: &mut String,
-        driver_asset_path_text: &mut String,
-        battery_asset_path_text: &mut String,
-        tire_asset_path_text: &mut String,
-        fan_asset_path_text: &mut String,
-        encoder_asset_path_text: &mut String,
-        gyro_asset_path_text: &mut String,
-        selected_fan_asset_index: &mut usize,
-        project_path: Option<&Path>,
-        component_asset_command: &mut Option<ComponentAssetCommand>,
-        status_to_set: &mut Option<String>,
-    ) -> bool {
-        let mut changed = false;
-        let panel_width = ui.available_width();
-
-        egui::Frame::group(ui.style())
-            .inner_margin(egui::Margin::same(8.0))
-            .show(ui, |ui| {
-                ui.set_width(panel_width);
-                ui.horizontal(|ui| {
-                    if robot_dirty {
-                        ui.strong("Robot File *modified");
-                    } else {
-                        ui.strong("Robot File");
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add_sized([70.0, 22.0], egui::Button::new("Save As"))
-                            .clicked()
-                        {
-                            let robots_dir = std::env::current_dir()
-                                .unwrap_or_else(|_| PathBuf::from("."))
-                                .join("Robots");
-                            let _ = fs::create_dir_all(&robots_dir);
-                            if let Some(path) = rfd::FileDialog::new()
-                                .set_title("Save Robot JSON")
-                                .set_file_name(json_file_name_from_name(&robot.name, "robot"))
-                                .add_filter("JSON", &["json"])
-                                .set_directory(&robots_dir)
-                                .save_file()
-                            {
-                                *robot_file_path_text = path.to_string_lossy().replace('\\', "/");
-                                *robot_file_command = RobotFileCommand::SaveAs;
-                            }
-                        }
-                        if ui
-                            .add_sized([52.0, 22.0], egui::Button::new("Save"))
-                            .clicked()
-                        {
-                            *robot_file_command = RobotFileCommand::Save;
-                        }
-                        if ui
-                            .add_sized([52.0, 22.0], egui::Button::new("Load"))
-                            .clicked()
-                        {
-                            let robots_dir = ensure_asset_dir("Robots");
-                            if let Some(path) = rfd::FileDialog::new()
-                                .set_title("Load Robot JSON")
-                                .set_directory(&robots_dir)
-                                .add_filter("JSON", &["json"])
-                                .pick_file()
-                            {
-                                *robot_file_path_text = path.to_string_lossy().replace('\\', "/");
-                                *robot_file_command = RobotFileCommand::Load;
-                            }
-                        }
-                        if ui
-                            .add_sized([48.0, 22.0], egui::Button::new("New"))
-                            .clicked()
-                        {
-                            *robot_file_command = RobotFileCommand::New;
-                        }
-                    });
-                });
-                if robot_dirty {
-                    ui.small(
-                        egui::RichText::new("Unsaved robot changes")
-                            .color(egui::Color32::from_rgb(190, 130, 30)),
-                    );
-                }
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.add_sized([42.0, 22.0], egui::Label::new("Path"));
-                    ui.add_sized(
-                        [ui.available_width(), 22.0],
-                        egui::TextEdit::singleline(robot_file_path_text),
-                    );
-                });
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.add_sized([42.0, 22.0], egui::Label::new("Name"));
-                    if ui
-                        .add_sized(
-                            [ui.available_width(), 22.0],
-                            egui::TextEdit::singleline(&mut robot.name),
-                        )
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                });
-            });
-
-        ui.add_space(8.0);
-        egui::CollapsingHeader::new("Chassis")
-            .default_open(true)
-            .show(ui, |ui| {
-                let c = &mut robot.chassis;
-                let mut mass_g = c.mass_kg * 1000.0;
-                let mut com_x_mm = c.center_of_mass_m.x * 1000.0;
-                let mut com_y_mm = c.center_of_mass_m.y * 1000.0;
-                let mut length_mm = c.length_m * 1000.0;
-                let mut width_mm = c.width_m * 1000.0;
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Mass [g]");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut mass_g)
-                                .speed(1.0)
-                                .clamp_range(1.0..=5000.0),
-                        )
-                        .changed()
-                    {
-                        c.mass_kg = mass_g / 1000.0;
-                        changed = true;
-                    }
-                    ui.label("Yaw inertia [kg·m²]");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut c.inertia_kg_m2)
-                                .speed(0.00001)
-                                .clamp_range(1e-8..=1.0),
-                        )
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                });
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("COM x/y [mm]");
-                    if ui
-                        .add(egui::DragValue::new(&mut com_x_mm).speed(0.5))
-                        .changed()
-                    {
-                        c.center_of_mass_m.x = com_x_mm / 1000.0;
-                        changed = true;
-                    }
-                    if ui
-                        .add(egui::DragValue::new(&mut com_y_mm).speed(0.5))
-                        .changed()
-                    {
-                        c.center_of_mass_m.y = com_y_mm / 1000.0;
-                        changed = true;
-                    }
-                });
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Length/width [mm]");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut length_mm)
-                                .speed(0.5)
-                                .clamp_range(1.0..=1000.0),
-                        )
-                        .changed()
-                    {
-                        c.length_m = length_mm / 1000.0;
-                        changed = true;
-                    }
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut width_mm)
-                                .speed(0.5)
-                                .clamp_range(1.0..=1000.0),
-                        )
-                        .changed()
-                    {
-                        c.width_m = width_mm / 1000.0;
-                        changed = true;
-                    }
-                });
-            });
-
-        egui::CollapsingHeader::new("Line validity areas")
-            .default_open(true)
-            .show(ui, |ui| {
-                ui.small(
-                    "The robot is valid while any enabled rectangle overlaps the course line.",
-                );
-                if ui.button("Add rectangle").clicked() {
-                    robot.line_validity_areas.push(RobotLineValidityArea {
-                        name: format!("Area {}", robot.line_validity_areas.len() + 1),
-                        position_m: Vec2::new(0.0, 0.0),
-                        length_m: 0.040,
-                        width_m: 0.040,
-                        angle_deg: 0.0,
-                        enabled: true,
-                    });
-                    changed = true;
-                }
-                let mut remove = None;
-                for (idx, area) in robot.line_validity_areas.iter_mut().enumerate() {
-                    ui.group(|ui| {
-                        ui.horizontal(|ui| {
-                            if ui.checkbox(&mut area.enabled, "").changed() {
-                                changed = true;
-                            }
-                            if ui.text_edit_singleline(&mut area.name).changed() {
-                                changed = true;
-                            }
-                            if ui.small_button("Remove").clicked() {
-                                remove = Some(idx);
-                            }
-                        });
-                        let mut x_mm = area.position_m.x * 1000.0;
-                        let mut y_mm = area.position_m.y * 1000.0;
-                        let mut length_mm = area.length_m * 1000.0;
-                        let mut width_mm = area.width_m * 1000.0;
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("X [mm]");
-                            if ui.add(egui::DragValue::new(&mut x_mm).speed(0.5)).changed() {
-                                area.position_m.x = x_mm / 1000.0;
-                                changed = true;
-                            }
-                            ui.label("Y [mm]");
-                            if ui.add(egui::DragValue::new(&mut y_mm).speed(0.5)).changed() {
-                                area.position_m.y = y_mm / 1000.0;
-                                changed = true;
-                            }
-                            ui.label("Angle [deg]");
-                            if ui
-                                .add(egui::DragValue::new(&mut area.angle_deg).speed(1.0))
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                        });
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("Length [mm]");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut length_mm)
-                                        .speed(0.5)
-                                        .clamp_range(0.1..=250.0),
-                                )
-                                .changed()
-                            {
-                                area.length_m = length_mm / 1000.0;
-                                changed = true;
-                            }
-                            ui.label("Width [mm]");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut width_mm)
-                                        .speed(0.5)
-                                        .clamp_range(0.1..=250.0),
-                                )
-                                .changed()
-                            {
-                                area.width_m = width_mm / 1000.0;
-                                changed = true;
-                            }
-                        });
-                    });
-                }
-                if let Some(idx) = remove {
-                    robot.line_validity_areas.remove(idx);
-                    changed = true;
-                }
-                if robot.line_validity_areas.is_empty() {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(190, 130, 30),
-                        "No validity area: the robot can never be considered over the line.",
-                    );
-                }
-            });
-
-        egui::CollapsingHeader::new("Drivetrain and Wheels")
-            .default_open(true)
-            .show(ui, |ui| {
-                let d = &mut robot.drivetrain;
-                let mut radius_mm = d.wheel_radius_m * 1000.0;
-                let mut width_mm = d.wheel_width_m * 1000.0;
-                let mut track_width_mm = d.track_width_m * 1000.0;
-                let mut wheelbase_mm = d.wheelbase_m * 1000.0;
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Wheel radius [mm]");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut radius_mm)
-                                .speed(0.1)
-                                .clamp_range(1.0..=100.0),
-                        )
-                        .changed()
-                    {
-                        d.wheel_radius_m = radius_mm / 1000.0;
-                        changed = true;
-                    }
-                    ui.label("Wheel width [mm]");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut width_mm)
-                                .speed(0.1)
-                                .clamp_range(1.0..=100.0),
-                        )
-                        .changed()
-                    {
-                        d.wheel_width_m = width_mm / 1000.0;
-                        changed = true;
-                    }
-                });
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Track width [mm]");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut track_width_mm)
-                                .speed(0.5)
-                                .clamp_range(1.0..=500.0),
-                        )
-                        .changed()
-                    {
-                        d.track_width_m = track_width_mm / 1000.0;
-                        changed = true;
-                    }
-                    ui.label("Wheelbase [mm]");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut wheelbase_mm)
-                                .speed(0.5)
-                                .clamp_range(1.0..=500.0),
-                        )
-                        .changed()
-                    {
-                        d.wheelbase_m = wheelbase_mm / 1000.0;
-                        changed = true;
-                    }
-                });
-            });
-
-        egui::CollapsingHeader::new("Tire / Friction")
-            .default_open(false)
-            .show(ui, |ui| {
-                component_asset_row(
-                    ui,
-                    "Tire",
-                    tire_asset_path_text,
-                    ComponentAssetKind::Tire,
-                    "RobotAssets/Tires",
-                    json_file_name_from_name(&robot.tire.model, "tire"),
-                    component_asset_command,
-                );
-                egui::CollapsingHeader::new("Technical tire parameters")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        egui::Grid::new("technical_tire_grid")
-                            .num_columns(2)
-                            .spacing([12.0, 6.0])
-                            .show(ui, |ui| {
-                                ui.label("Model");
-                                if ui
-                                    .add(
-                                        egui::TextEdit::singleline(&mut robot.tire.model)
-                                            .desired_width(190.0),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.end_row();
-                                ui.label("μ longitudinal");
-                                if ui
-                                    .add(
-                                        egui::DragValue::new(&mut robot.tire.mu_longitudinal)
-                                            .speed(0.01)
-                                            .clamp_range(0.0..=5.0),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.end_row();
-                                ui.label("μ lateral");
-                                if ui
-                                    .add(
-                                        egui::DragValue::new(&mut robot.tire.mu_lateral)
-                                            .speed(0.01)
-                                            .clamp_range(0.0..=5.0),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.end_row();
-                                ui.label("Rolling");
-                                if ui
-                                    .add(
-                                        egui::DragValue::new(&mut robot.tire.rolling_resistance)
-                                            .speed(0.001)
-                                            .clamp_range(0.0..=1.0),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.end_row();
-                                ui.label("Slip epsilon [m/s]");
-                                if ui
-                                    .add(
-                                        egui::DragValue::new(
-                                            &mut robot.tire.slip_velocity_epsilon_m_s,
-                                        )
-                                        .speed(0.001)
-                                        .clamp_range(0.0..=10.0),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.end_row();
-                            });
-                    });
-            });
-
-        egui::CollapsingHeader::new("Motor, Driver and Battery")
-            .default_open(false)
-            .show(ui, |ui| {
-                component_asset_row(
-                    ui,
-                    "Motor",
-                    motor_left_asset_path_text,
-                    ComponentAssetKind::MotorLeft,
-                    "RobotAssets/Motors",
-                    json_file_name_from_name(&robot.motor_left.model, "motor"),
-                    component_asset_command,
-                );
-                let mut motor_changed = false;
-                egui::CollapsingHeader::new("Technical motor parameters")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        motor_editor(
-                            ui,
-                            "Shared motor model",
-                            &mut robot.motor_left,
-                            &mut motor_changed,
-                        );
-                    });
-                if motor_changed {
-                    robot.motor_right = robot.motor_left.clone();
-                }
-                changed |= motor_changed;
-                ui.separator();
-                component_asset_row(
-                    ui,
-                    "Driver",
-                    driver_asset_path_text,
-                    ComponentAssetKind::Driver,
-                    "RobotAssets/Drivers",
-                    json_file_name_from_name(&robot.driver.model, "driver"),
-                    component_asset_command,
-                );
-                egui::CollapsingHeader::new("Technical driver parameters")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        egui::Grid::new("technical_driver_grid")
-                            .num_columns(2)
-                            .spacing([12.0, 6.0])
-                            .show(ui, |ui| {
-                                ui.label("Driver");
-                                if ui
-                                    .add(
-                                        egui::TextEdit::singleline(&mut robot.driver.model)
-                                            .desired_width(190.0),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.end_row();
-                                ui.label("PWM [Hz]");
-                                if ui
-                                    .add(
-                                        egui::DragValue::new(&mut robot.driver.pwm_frequency_hz)
-                                            .speed(100.0)
-                                            .clamp_range(10.0..=200_000.0),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.end_row();
-                                ui.label("Mode");
-                                let old_mode = robot.driver.mode.clone();
-                                egui::ComboBox::from_id_source("robot_driver_mode")
-                                    .selected_text(robot.driver.mode.as_str())
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(
-                                            &mut robot.driver.mode,
-                                            "brake".to_string(),
-                                            "brake",
-                                        );
-                                        ui.selectable_value(
-                                            &mut robot.driver.mode,
-                                            "coast".to_string(),
-                                            "coast",
-                                        );
-                                    });
-                                if robot.driver.mode != old_mode {
-                                    changed = true;
-                                }
-                                ui.end_row();
-                                ui.label("Driver drop [V]");
-                                if ui
-                                    .add(
-                                        egui::DragValue::new(&mut robot.driver.voltage_drop_v)
-                                            .speed(0.01)
-                                            .clamp_range(0.0..=5.0),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.end_row();
-                                ui.label("Current limit [A]");
-                                if ui
-                                    .add(
-                                        egui::DragValue::new(&mut robot.driver.current_limit_a)
-                                            .speed(0.1)
-                                            .clamp_range(0.0..=500.0),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.end_row();
-                                ui.label("PWM resolution [bits]");
-                                if ui
-                                    .add(
-                                        egui::DragValue::new(&mut robot.driver.pwm_resolution_bits)
-                                            .clamp_range(1.0..=32.0),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.end_row();
-                                ui.label("Command deadband");
-                                if ui
-                                    .add(
-                                        egui::DragValue::new(&mut robot.driver.command_deadband)
-                                            .speed(0.0001)
-                                            .clamp_range(0.0..=1.0),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.end_row();
-                            });
-                    });
-                ui.separator();
-                component_asset_row(
-                    ui,
-                    "Battery",
-                    battery_asset_path_text,
-                    ComponentAssetKind::Battery,
-                    "RobotAssets/Batteries",
-                    json_file_name_from_name(&robot.battery.model, "battery"),
-                    component_asset_command,
-                );
-                egui::CollapsingHeader::new("Technical battery parameters")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        egui::Grid::new("technical_battery_grid")
-                            .num_columns(2)
-                            .spacing([12.0, 6.0])
-                            .show(ui, |ui| {
-                                ui.label("Battery");
-                                if ui
-                                    .add(
-                                        egui::TextEdit::singleline(&mut robot.battery.model)
-                                            .desired_width(190.0),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.end_row();
-                                ui.label("Cells");
-                                if ui
-                                    .add(
-                                        egui::DragValue::new(&mut robot.battery.cells)
-                                            .clamp_range(1.0..=8.0),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.end_row();
-                                ui.label("Nominal V");
-                                if ui
-                                    .add(
-                                        egui::DragValue::new(&mut robot.battery.nominal_voltage_v)
-                                            .speed(0.1),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.end_row();
-                                ui.label("R int [Ω]");
-                                if ui
-                                    .add(
-                                        egui::DragValue::new(
-                                            &mut robot.battery.internal_resistance_ohm,
-                                        )
-                                        .speed(0.001)
-                                        .clamp_range(0.0..=10.0),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.end_row();
-                                ui.label("Full V");
-                                if ui
-                                    .add(
-                                        egui::DragValue::new(&mut robot.battery.full_voltage_v)
-                                            .speed(0.1),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.end_row();
-                                ui.label("Empty V");
-                                if ui
-                                    .add(
-                                        egui::DragValue::new(&mut robot.battery.empty_voltage_v)
-                                            .speed(0.1),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.end_row();
-                                ui.label("Capacity [mAh]");
-                                if ui
-                                    .add(
-                                        egui::DragValue::new(&mut robot.battery.capacity_mah)
-                                            .speed(1.0)
-                                            .clamp_range(1.0..=1_000_000.0),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.end_row();
-                                ui.label("Initial SOC");
-                                if ui
-                                    .add(
-                                        egui::DragValue::new(&mut robot.battery.initial_soc)
-                                            .speed(0.01)
-                                            .clamp_range(0.0..=1.0),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.end_row();
-                                ui.label("Current limit [A]");
-                                if ui
-                                    .add(
-                                        egui::DragValue::new(&mut robot.battery.current_limit_a)
-                                            .speed(0.1)
-                                            .clamp_range(0.0..=10_000.0),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.end_row();
-                            });
-                    });
-            });
-
-        egui::CollapsingHeader::new("Sensors")
-            .default_open(true)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.strong("Shared sensor model");
-                    if ui.button("Add Sensor").clicked() {
-                        let mut instance = default_sensor_instance();
-                        if let Some(shared) = robot.sensors.first() {
-                            instance.asset = shared.asset.clone();
-                            instance.asset_path = shared.asset_path.clone();
-                        }
-                        instance.name = format!("Sensor {}", robot.sensors.len() + 1);
-                        robot.sensors.push(instance);
-                        changed = true;
-                    }
-                });
-                changed |=
-                    edit_sensor_instances_ui(ui, &mut robot.sensors, project_path, status_to_set);
-            });
-
-        egui::CollapsingHeader::new("Encoder and Gyro")
-            .default_open(false)
-            .show(ui, |ui| {
-                component_asset_row(
-                    ui,
-                    "Encoder",
-                    encoder_asset_path_text,
-                    ComponentAssetKind::Encoder,
-                    "RobotAssets/Encoders",
-                    json_file_name_from_name(&robot.encoder.model, "encoder"),
-                    component_asset_command,
-                );
-                egui::CollapsingHeader::new("Technical encoder parameters")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("Ticks/rev");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut robot.encoder.ticks_per_rev)
-                                        .clamp_range(1.0..=100_000.0),
-                                )
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                            if ui
-                                .checkbox(&mut robot.encoder.invert_left, "Invert left")
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                            if ui
-                                .checkbox(&mut robot.encoder.invert_right, "Invert right")
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                        });
-                    });
-                ui.separator();
-                component_asset_row(
-                    ui,
-                    "Gyro",
-                    gyro_asset_path_text,
-                    ComponentAssetKind::Gyro,
-                    "RobotAssets/Gyros",
-                    json_file_name_from_name(&robot.gyro.model, "gyro"),
-                    component_asset_command,
-                );
-                egui::CollapsingHeader::new("Technical gyro parameters")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("Noise [rad/s]");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut robot.gyro.noise_std_rad_s)
-                                        .speed(0.001)
-                                        .clamp_range(0.0..=10.0),
-                                )
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                            ui.label("Bias [rad/s]");
-                            if ui
-                                .add(egui::DragValue::new(&mut robot.gyro.bias_rad_s).speed(0.001))
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                            ui.label("Saturation [rad/s]");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut robot.gyro.saturation_rad_s)
-                                        .speed(0.1)
-                                        .clamp_range(0.0..=1_000.0),
-                                )
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                            ui.label("Noise seed");
-                            if ui.add(egui::DragValue::new(&mut robot.gyro.seed)).changed() {
-                                changed = true;
-                            }
-                        });
-                    });
-            });
-
-        egui::CollapsingHeader::new("Normal / Downforce / Suction")
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Model");
-                    let old_model = robot.normal_force.model.clone();
-                    egui::ComboBox::from_id_source("robot_normal_force_model")
-                        .selected_text(robot.normal_force.model.as_str())
-                        .show_ui(ui, |ui| {
-                            for model in [
-                                "NoDownforce",
-                                "ConstantDownforce",
-                                "FanDownforce",
-                                "SuctionDownforce",
-                                "MeasuredDownforceCurve",
-                            ] {
-                                ui.selectable_value(
-                                    &mut robot.normal_force.model,
-                                    model.to_string(),
-                                    model,
-                                );
-                            }
-                        });
-                    if robot.normal_force.model != old_model {
-                        changed = true;
-                    }
-                });
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Max force [N]");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut robot.normal_force.max_force_n)
-                                .speed(0.01)
-                                .clamp_range(0.0..=100.0),
-                        )
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                    ui.label("Max current [A]");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut robot.normal_force.max_current_a)
-                                .speed(0.01)
-                                .clamp_range(0.0..=100.0),
-                        )
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                    ui.label("Response [s]");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut robot.normal_force.response_time_s)
-                                .speed(0.001)
-                                .clamp_range(0.0..=10.0),
-                        )
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                });
-                ui.horizontal_wrapped(|ui| {
-                    let mut x_mm = robot.normal_force.position_m.x * 1000.0;
-                    let mut y_mm = robot.normal_force.position_m.y * 1000.0;
-                    ui.label("Apply pos x/y [mm]");
-                    if ui.add(egui::DragValue::new(&mut x_mm).speed(0.5)).changed() {
-                        robot.normal_force.position_m.x = x_mm / 1000.0;
-                        changed = true;
-                    }
-                    if ui.add(egui::DragValue::new(&mut y_mm).speed(0.5)).changed() {
-                        robot.normal_force.position_m.y = y_mm / 1000.0;
-                        changed = true;
-                    }
-                    ui.label("Suction area [m²]");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut robot.normal_force.chamber_area_m2)
-                                .speed(0.0001)
-                                .clamp_range(0.0..=1.0),
-                        )
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                });
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.strong("Fans");
-                    if ui.button("Add fan").clicked() {
-                        let fan =
-                            robot.normal_force.fans.first().cloned().unwrap_or_else(|| {
-                                default_fan_config(robot.battery.nominal_voltage_v)
-                            });
-                        robot.normal_force.fans.push(fan);
-                        *selected_fan_asset_index = robot.normal_force.fans.len() - 1;
-                        robot.normal_force.model = "FanDownforce".to_string();
-                        robot.normal_force.model_kind = DownforceModel::Fan {
-                            nominal_voltage_v: robot.battery.nominal_voltage_v,
-                            nominal_current_a: 0.70,
-                            max_force_n: 0.50,
-                            curve: FanCurveModel::LookupTable,
-                            response_time_s: 0.03,
-                        };
-                        changed = true;
-                    }
-                });
-                component_asset_row(
-                    ui,
-                    "Fan model",
-                    fan_asset_path_text,
-                    ComponentAssetKind::Fan,
-                    "RobotAssets/Fans",
-                    "fan_model.json".to_string(),
-                    component_asset_command,
-                );
-                if let Some(fan) = robot.normal_force.fans.first() {
-                    ui.label(format!(
-                        "Shared model: {} V / {:.2} A / {:.2} N",
-                        fan.nominal_voltage_v, fan.nominal_current_a, fan.max_force_n
-                    ));
-                }
-                let mut remove_fan: Option<usize> = None;
-                for (idx, fan) in robot.normal_force.fans.iter_mut().enumerate() {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(format!("Fan {}", idx + 1));
-                        let mut x_mm = fan.position_m.x * 1000.0;
-                        let mut y_mm = fan.position_m.y * 1000.0;
-                        ui.label("x/y [mm]");
-                        if ui.add(egui::DragValue::new(&mut x_mm).speed(0.5)).changed() {
-                            fan.position_m.x = x_mm / 1000.0;
-                            changed = true;
-                        }
-                        if ui.add(egui::DragValue::new(&mut y_mm).speed(0.5)).changed() {
-                            fan.position_m.y = y_mm / 1000.0;
-                            changed = true;
-                        }
-                        if ui.button("remove").clicked() {
-                            remove_fan = Some(idx);
-                        }
-                    });
-                    if idx == 0 {
-                        egui::CollapsingHeader::new("Technical fan model parameters")
-                            .id_source(format!("fan_technical_params_{idx}"))
-                            .default_open(false)
-                            .show(ui, |ui| {
-                                ui.horizontal_wrapped(|ui| {
-                                    let mut visual_radius_mm = fan.visual_radius_m * 1000.0;
-                                    let mut action_radius_mm = fan.action_radius_m * 1000.0;
-                                    ui.label("visual/action radius [mm]");
-                                    if ui
-                                        .add(
-                                            egui::DragValue::new(&mut visual_radius_mm)
-                                                .speed(0.2)
-                                                .clamp_range(0.0..=125.0),
-                                        )
-                                        .changed()
-                                    {
-                                        fan.visual_radius_m = visual_radius_mm / 1000.0;
-                                        changed = true;
-                                    }
-                                    if ui
-                                        .add(
-                                            egui::DragValue::new(&mut action_radius_mm)
-                                                .speed(0.2)
-                                                .clamp_range(0.0..=250.0),
-                                        )
-                                        .changed()
-                                    {
-                                        fan.action_radius_m = action_radius_mm / 1000.0;
-                                        changed = true;
-                                    }
-                                    ui.label("nominal V/I");
-                                    if ui
-                                        .add(
-                                            egui::DragValue::new(&mut fan.nominal_voltage_v)
-                                                .speed(0.1),
-                                        )
-                                        .changed()
-                                    {
-                                        fan.power_w = fan.nominal_voltage_v * fan.nominal_current_a;
-                                        changed = true;
-                                    }
-                                    if ui
-                                        .add(
-                                            egui::DragValue::new(&mut fan.nominal_current_a)
-                                                .speed(0.01),
-                                        )
-                                        .changed()
-                                    {
-                                        fan.power_w = fan.nominal_voltage_v * fan.nominal_current_a;
-                                        changed = true;
-                                    }
-                                    ui.label("response [s]");
-                                    if ui
-                                        .add(
-                                            egui::DragValue::new(&mut fan.response_time_s)
-                                                .speed(0.001)
-                                                .clamp_range(0.0..=10.0),
-                                        )
-                                        .changed()
-                                    {
-                                        changed = true;
-                                    }
-                                    ui.label("Max force [N]");
-                                    if ui
-                                        .add(
-                                            egui::DragValue::new(&mut fan.max_force_n)
-                                                .speed(0.01)
-                                                .clamp_range(0.0..=100.0),
-                                        )
-                                        .changed()
-                                    {
-                                        changed = true;
-                                    }
-                                    ui.label("Max current [A]");
-                                    if ui
-                                        .add(
-                                            egui::DragValue::new(&mut fan.max_current_a)
-                                                .speed(0.01)
-                                                .clamp_range(0.0..=100.0),
-                                        )
-                                        .changed()
-                                    {
-                                        changed = true;
-                                    }
-                                });
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("Force curve");
-                                    let old_curve = fan.curve_model;
-                                    egui::ComboBox::from_id_source(format!(
-                                        "fan_curve_model_{idx}"
-                                    ))
-                                    .selected_text(fan.curve_model.as_str())
-                                    .show_ui(ui, |ui| {
-                                        for curve in [
-                                            FanCurveModel::Linear,
-                                            FanCurveModel::Exponential,
-                                            FanCurveModel::Polynomial,
-                                            FanCurveModel::LookupTable,
-                                            FanCurveModel::Custom,
-                                        ] {
-                                            ui.selectable_value(
-                                                &mut fan.curve_model,
-                                                curve,
-                                                curve.as_str(),
-                                            );
-                                        }
-                                    });
-                                    if fan.curve_model != old_curve {
-                                        changed = true;
-                                    }
-                                });
-                            });
-                    }
-                }
-                if let Some(idx) = remove_fan {
-                    robot.normal_force.fans.remove(idx);
-                    if robot.normal_force.fans.is_empty() {
-                        *selected_fan_asset_index = 0;
-                    } else {
-                        *selected_fan_asset_index =
-                            (*selected_fan_asset_index).min(robot.normal_force.fans.len() - 1);
-                    }
-                    changed = true;
-                }
-                if let Some(shared) = robot.normal_force.fans.first().cloned() {
-                    for fan in robot.normal_force.fans.iter_mut().skip(1) {
-                        let position = fan.position_m;
-                        *fan = shared.clone();
-                        fan.position_m = position;
-                    }
-                }
-            });
-
-        changed
-    }
-
-    fn component_asset_row(
-        ui: &mut egui::Ui,
-        label: &str,
-        path_text: &mut String,
-        kind: ComponentAssetKind,
-        dir: &str,
-        suggested_file_name: String,
-        command: &mut Option<ComponentAssetCommand>,
-    ) {
-        ui.horizontal(|ui| {
-            let spacing = ui.spacing().item_spacing.x;
-            let buttons_width = 38.0 + 40.0 + 40.0 + 56.0 + spacing * 4.0;
-            let field_width = (ui.available_width() - buttons_width).max(60.0);
-            ui.add_sized([field_width, 22.0], egui::TextEdit::singleline(path_text));
-            if ui
-                .add_sized([38.0, 22.0], egui::Button::new("New"))
-                .clicked()
-            {
-                *command = Some(ComponentAssetCommand {
-                    kind,
-                    command: ComponentAssetCommandKind::New,
-                });
-            }
-            if ui
-                .add_sized([40.0, 22.0], egui::Button::new("Load"))
-                .clicked()
-            {
-                let dir = ensure_asset_dir(dir);
-                if let Some(path) = rfd::FileDialog::new()
-                    .set_title(format!("Load {label} JSON"))
-                    .set_directory(&dir)
-                    .add_filter("JSON", &["json"])
-                    .pick_file()
-                {
-                    *path_text = path.to_string_lossy().replace('\\', "/");
-                    *command = Some(ComponentAssetCommand {
-                        kind,
-                        command: ComponentAssetCommandKind::Load,
-                    });
-                }
-            }
-            if ui
-                .add_sized([40.0, 22.0], egui::Button::new("Save"))
-                .clicked()
-            {
-                *command = Some(ComponentAssetCommand {
-                    kind,
-                    command: ComponentAssetCommandKind::Save,
-                });
-            }
-            if ui
-                .add_sized([56.0, 22.0], egui::Button::new("Save As"))
-                .clicked()
-            {
-                let dir = ensure_asset_dir(dir);
-                if let Some(path) = rfd::FileDialog::new()
-                    .set_title(format!("Save {label} JSON"))
-                    .set_file_name(suggested_file_name)
-                    .add_filter("JSON", &["json"])
-                    .set_directory(&dir)
-                    .save_file()
-                {
-                    *path_text = path.to_string_lossy().replace('\\', "/");
-                    *command = Some(ComponentAssetCommand {
-                        kind,
-                        command: ComponentAssetCommandKind::SaveAs,
-                    });
-                }
-            }
-        });
-    }
-
-    enum SensorInstanceAction {
-        Duplicate(usize),
-        Remove(usize),
-    }
-
-    fn edit_sensor_instances_ui(
-        ui: &mut egui::Ui,
-        sensors: &mut Vec<RobotSensorInstance>,
-        project_path: Option<&Path>,
-        status_to_set: &mut Option<String>,
-    ) -> bool {
-        let mut changed = false;
-        let mut action: Option<SensorInstanceAction> = None;
-        if sensors.is_empty() {
-            ui.label("No sensor instances. Use Add Sensor to place one.");
-        }
-        for (idx, sensor) in sensors.iter_mut().enumerate() {
-            ui.group(|ui| {
-                ui.set_width(ui.available_width());
-
-                // Linha 1: título e flags visuais
-                ui.horizontal_wrapped(|ui| {
-                    ui.strong(if idx == 0 {
-                        format!("Shared model: {}", sensor.asset.model)
-                    } else {
-                        format!("Sensor unit {}", idx + 1)
-                    });
-                });
-
-                // Linha 2: botões de ação da instância
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .add_sized([78.0, 22.0], egui::Button::new("Duplicate"))
-                        .clicked()
-                    {
-                        action = Some(SensorInstanceAction::Duplicate(idx));
-                    }
-
-                    if ui
-                        .add_sized([108.0, 22.0], egui::Button::new("Remove Sensor"))
-                        .clicked()
-                    {
-                        action = Some(SensorInstanceAction::Remove(idx));
-                    }
-                });
-
-                ui.add_space(4.0);
-
-                // Linha 3: nome da instância
-                ui.horizontal(|ui| {
-                    ui.add_sized([88.0, 22.0], egui::Label::new("Instance name"));
-
-                    if ui
-                        .add_sized(
-                            [ui.available_width(), 22.0],
-                            egui::TextEdit::singleline(&mut sensor.name),
-                        )
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                });
-
-                // Linha 4: posição e ângulo
-                let mut x_mm = sensor.position_m.x * 1000.0;
-                let mut y_mm = sensor.position_m.y * 1000.0;
-
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("X [mm]");
-                    if ui
-                        .add_sized([56.0, 22.0], egui::DragValue::new(&mut x_mm).speed(0.5))
-                        .changed()
-                    {
-                        sensor.position_m.x = x_mm / 1000.0;
-                        changed = true;
-                    }
-
-                    ui.label("Y [mm]");
-                    if ui
-                        .add_sized([56.0, 22.0], egui::DragValue::new(&mut y_mm).speed(0.5))
-                        .changed()
-                    {
-                        sensor.position_m.y = y_mm / 1000.0;
-                        changed = true;
-                    }
-
-                    ui.label("Angle [deg]");
-                    if ui
-                        .add_sized(
-                            [56.0, 22.0],
-                            egui::DragValue::new(&mut sensor.angle_deg).speed(1.0),
-                        )
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                });
-
-                // Linha 5: asset path + seletor de arquivo
-                if idx == 0 {
-                    let mut path_text = sensor.asset_path.to_string_lossy().replace('\\', "/");
-
-                    ui.horizontal(|ui| {
-                        ui.add_sized([64.0, 22.0], egui::Label::new("Asset path"));
-
-                        if ui
-                            .add_sized(
-                                [ui.available_width(), 22.0],
-                                egui::TextEdit::singleline(&mut path_text),
-                            )
-                            .changed()
-                        {
-                            sensor.asset_path = PathBuf::from(path_text.clone());
-                            changed = true;
-                        }
-                    });
-
-                    // Linha 6: comandos do asset
-                    ui.horizontal_wrapped(|ui| {
-                        if ui
-                            .add_sized([44.0, 22.0], egui::Button::new("Load"))
-                            .clicked()
-                        {
-                            if let Some(path) = rfd::FileDialog::new()
-                                .set_title("Load sensor asset JSON")
-                                .set_directory(ensure_asset_dir("RobotAssets/Sensors"))
-                                .add_filter("JSON", &["json"])
-                                .pick_file()
-                            {
-                                match load_sensor_asset_from_file(&path) {
-                                    Ok(asset) => {
-                                        sensor.asset = asset;
-                                        sensor.asset_path = path.clone();
-                                        *status_to_set = Some(format!(
-                                            "Sensor asset loaded from {}",
-                                            path.display()
-                                        ));
-                                        changed = true;
-                                    }
-                                    Err(err) => {
-                                        *status_to_set =
-                                            Some(format!("Failed to load sensor asset: {err}"));
-                                    }
-                                }
-                            }
-                        }
-
-                        if ui
-                            .add_sized([44.0, 22.0], egui::Button::new("New"))
-                            .clicked()
-                        {
-                            sensor.asset = default_sensor_asset();
-                            changed = true;
-                        }
-
-                        if ui
-                            .add_sized([44.0, 22.0], egui::Button::new("Save"))
-                            .clicked()
-                        {
-                            let path = resolve_asset_path_text(
-                                project_path,
-                                &sensor.asset_path.to_string_lossy(),
-                            );
-
-                            match save_sensor_asset_to_file(&sensor.asset, &path) {
-                                Ok(()) => {
-                                    sensor.asset_path = path.clone();
-                                    *status_to_set =
-                                        Some(format!("Sensor asset saved to {}", path.display()));
-                                }
-                                Err(err) => {
-                                    *status_to_set =
-                                        Some(format!("Failed to save sensor asset: {err}"));
-                                }
-                            }
-                        }
-
-                        if ui
-                            .add_sized([62.0, 22.0], egui::Button::new("Save As"))
-                            .clicked()
-                        {
-                            let dir = ensure_asset_dir("RobotAssets/Sensors");
-                            let suggested =
-                                json_file_name_from_name(&sensor.asset.name, "sensor_asset");
-
-                            if let Some(path) = rfd::FileDialog::new()
-                                .set_title("Save sensor asset JSON")
-                                .set_file_name(suggested)
-                                .set_directory(&dir)
-                                .add_filter("JSON", &["json"])
-                                .save_file()
-                            {
-                                match save_sensor_asset_to_file(&sensor.asset, &path) {
-                                    Ok(()) => {
-                                        sensor.asset_path = path.clone();
-                                        *status_to_set = Some(format!(
-                                            "Sensor asset saved as {}",
-                                            path.display()
-                                        ));
-                                        changed = true;
-                                    }
-                                    Err(err) => {
-                                        *status_to_set =
-                                            Some(format!("Failed to save sensor asset: {err}"));
-                                    }
-                                }
-                            }
-                        }
-                    });
-
-                    egui::CollapsingHeader::new("Technical model information")
-                        .id_source(format!("sensor_asset_params_{idx}"))
-                        .default_open(false)
-                        .show(ui, |ui| {
-                            changed |= edit_sensor_asset_ui(ui, &mut sensor.asset, idx);
-                        });
-                }
-            });
-            ui.add_space(4.0);
-        }
-
-        if let Some(action) = action {
-            match action {
-                SensorInstanceAction::Duplicate(idx) => {
-                    if let Some(sensor) = sensors.get(idx).cloned() {
-                        let mut copy = sensor;
-                        copy.name = format!("{} copy", copy.name);
-                        copy.position_m.y = (copy.position_m.y + 0.010).clamp(-0.125, 0.125);
-                        sensors.insert(idx + 1, copy);
-                        changed = true;
-                    }
-                }
-                SensorInstanceAction::Remove(idx) => {
-                    if idx < sensors.len() {
-                        sensors.remove(idx);
-                        changed = true;
-                    }
-                }
-            }
-        }
-        if let Some(shared) = sensors.first().cloned() {
-            for sensor in sensors.iter_mut().skip(1) {
-                sensor.asset_path = shared.asset_path.clone();
-                sensor.asset = shared.asset.clone();
-                sensor.enabled = true;
-                sensor.visible_in_preview = true;
-            }
-        }
-        changed
-    }
-
-    fn edit_sensor_asset_ui(ui: &mut egui::Ui, asset: &mut SensorAsset, idx: usize) -> bool {
-        let mut changed = false;
-        ui.horizontal_wrapped(|ui| {
-            if ui.text_edit_singleline(&mut asset.name).changed() {
-                changed = true;
-            }
-            ui.label("Model");
-            if ui.text_edit_singleline(&mut asset.model).changed() {
-                changed = true;
-            }
-            let old_type = asset.sensor_type;
-            egui::ComboBox::from_id_source(format!("sensor_type_{idx}"))
-                .selected_text(asset.sensor_type.as_str())
-                .show_ui(ui, |ui| {
-                    for ty in [
-                        SensorType::LineAnalog,
-                        SensorType::LineDigital,
-                        SensorType::DistanceInfrared,
-                        SensorType::DistanceToF,
-                        SensorType::Ultrasonic,
-                        SensorType::Color,
-                        SensorType::Encoder,
-                        SensorType::Gyro,
-                        SensorType::Accelerometer,
-                        SensorType::Custom,
-                    ] {
-                        ui.selectable_value(&mut asset.sensor_type, ty, ty.as_str());
-                    }
-                });
-            if asset.sensor_type != old_type {
-                changed = true;
-            }
-        });
-        ui.horizontal_wrapped(|ui| {
-            let mut visual_w_mm = asset.visual_width_m * 1000.0;
-            let mut visual_h_mm = asset.visual_height_m * 1000.0;
-            let mut visual_r_mm = asset.visual_radius_m * 1000.0;
-            ui.label("Visual width/height/radius [mm]");
-            if ui
-                .add(
-                    egui::DragValue::new(&mut visual_w_mm)
-                        .speed(0.2)
-                        .clamp_range(0.0..=250.0),
-                )
-                .changed()
-            {
-                asset.visual_width_m = visual_w_mm / 1000.0;
-                changed = true;
-            }
-            if ui
-                .add(
-                    egui::DragValue::new(&mut visual_h_mm)
-                        .speed(0.2)
-                        .clamp_range(0.0..=250.0),
-                )
-                .changed()
-            {
-                asset.visual_height_m = visual_h_mm / 1000.0;
-                changed = true;
-            }
-            if ui
-                .add(
-                    egui::DragValue::new(&mut visual_r_mm)
-                        .speed(0.2)
-                        .clamp_range(0.0..=125.0),
-                )
-                .changed()
-            {
-                asset.visual_radius_m = visual_r_mm / 1000.0;
-                changed = true;
-            }
-        });
-        changed |= edit_sensor_detection_area_ui(ui, &mut asset.detection_area, idx);
-        changed |= edit_sensor_response_model_ui(ui, &mut asset.response_model, idx);
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Notes");
-            if ui.text_edit_singleline(&mut asset.notes).changed() {
-                changed = true;
-            }
-        });
-        changed
-    }
-
-    fn sensor_detection_kind(area: &SensorDetectionArea) -> &'static str {
-        match area {
-            SensorDetectionArea::Point { .. } => "Point",
-            SensorDetectionArea::Rectangle { .. } => "Rectangle",
-            SensorDetectionArea::Circle { .. } => "Circle",
-            SensorDetectionArea::Cone { .. } => "Cone",
-            SensorDetectionArea::CustomPolygon { .. } => "CustomPolygon",
-        }
-    }
-
-    fn default_detection_area_kind(kind: &str) -> SensorDetectionArea {
-        match kind {
-            "Point" => SensorDetectionArea::Point { radius_m: 0.002 },
-            "Rectangle" => SensorDetectionArea::Rectangle {
-                width_m: 0.005,
-                height_m: 0.002,
-            },
-            "Circle" => SensorDetectionArea::Circle { radius_m: 0.004 },
-            "Cone" => SensorDetectionArea::Cone {
-                range_m: 0.080,
-                angle_deg: 25.0,
-            },
-            "CustomPolygon" => SensorDetectionArea::CustomPolygon {
-                points_m: vec![
-                    Vec2::new(0.0, -0.003),
-                    Vec2::new(0.010, 0.0),
-                    Vec2::new(0.0, 0.003),
-                ],
-            },
-            _ => SensorDetectionArea::Point { radius_m: 0.002 },
-        }
-    }
-
-    fn edit_sensor_detection_area_ui(
-        ui: &mut egui::Ui,
-        area: &mut SensorDetectionArea,
-        idx: usize,
-    ) -> bool {
-        let mut changed = false;
-        let current = sensor_detection_kind(area).to_string();
-        let mut selected = current.clone();
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Detection area");
-            egui::ComboBox::from_id_source(format!("sensor_detection_{idx}"))
-                .selected_text(selected.as_str())
-                .show_ui(ui, |ui| {
-                    for kind in ["Point", "Rectangle", "Circle", "Cone", "CustomPolygon"] {
-                        ui.selectable_value(&mut selected, kind.to_string(), kind);
-                    }
-                });
-        });
-        if selected != current {
-            *area = default_detection_area_kind(&selected);
-            changed = true;
-        }
-        ui.horizontal_wrapped(|ui| match area {
-            SensorDetectionArea::Point { radius_m } => {
-                let mut radius_mm = *radius_m * 1000.0;
-                ui.label("radius [mm]");
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut radius_mm)
-                            .speed(0.1)
-                            .clamp_range(0.0..=250.0),
-                    )
-                    .changed()
-                {
-                    *radius_m = radius_mm / 1000.0;
-                    changed = true;
-                }
-            }
-            SensorDetectionArea::Rectangle { width_m, height_m } => {
-                let mut w_mm = *width_m * 1000.0;
-                let mut h_mm = *height_m * 1000.0;
-                ui.label("width/height [mm]");
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut w_mm)
-                            .speed(0.1)
-                            .clamp_range(0.0..=250.0),
-                    )
-                    .changed()
-                {
-                    *width_m = w_mm / 1000.0;
-                    changed = true;
-                }
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut h_mm)
-                            .speed(0.1)
-                            .clamp_range(0.0..=250.0),
-                    )
-                    .changed()
-                {
-                    *height_m = h_mm / 1000.0;
-                    changed = true;
-                }
-            }
-            SensorDetectionArea::Circle { radius_m } => {
-                let mut radius_mm = *radius_m * 1000.0;
-                ui.label("radius [mm]");
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut radius_mm)
-                            .speed(0.1)
-                            .clamp_range(0.0..=500.0),
-                    )
-                    .changed()
-                {
-                    *radius_m = radius_mm / 1000.0;
-                    changed = true;
-                }
-            }
-            SensorDetectionArea::Cone { range_m, angle_deg } => {
-                let mut range_mm = *range_m * 1000.0;
-                ui.label("range [mm]");
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut range_mm)
-                            .speed(1.0)
-                            .clamp_range(0.0..=2000.0),
-                    )
-                    .changed()
-                {
-                    *range_m = range_mm / 1000.0;
-                    changed = true;
-                }
-                ui.label("angle [deg]");
-                if ui
-                    .add(
-                        egui::DragValue::new(angle_deg)
-                            .speed(1.0)
-                            .clamp_range(0.0..=180.0),
-                    )
-                    .changed()
-                {
-                    changed = true;
-                }
-            }
-            SensorDetectionArea::CustomPolygon { points_m } => {
-                if ui.button("Add point").clicked() {
-                    points_m.push(Vec2::new(0.0, 0.0));
-                    changed = true;
-                }
-                let mut remove = None;
-                for (i, p) in points_m.iter_mut().enumerate() {
-                    let mut x_mm = p.x * 1000.0;
-                    let mut y_mm = p.y * 1000.0;
-                    ui.label(format!("p{i}"));
-                    if ui.add(egui::DragValue::new(&mut x_mm).speed(0.5)).changed() {
-                        p.x = x_mm / 1000.0;
-                        changed = true;
-                    }
-                    if ui.add(egui::DragValue::new(&mut y_mm).speed(0.5)).changed() {
-                        p.y = y_mm / 1000.0;
-                        changed = true;
-                    }
-                    if ui.small_button("x").clicked() {
-                        remove = Some(i);
-                    }
-                }
-                if let Some(i) = remove {
-                    points_m.remove(i);
-                    changed = true;
-                }
-            }
-        });
-        changed
-    }
-
-    fn response_model_kind(model: &SensorResponseModel) -> &'static str {
-        match model {
-            SensorResponseModel::Ideal => "Ideal",
-            SensorResponseModel::Threshold { .. } => "Threshold",
-            SensorResponseModel::Linear { .. } => "Linear",
-            SensorResponseModel::Polynomial { .. } => "Polynomial",
-            SensorResponseModel::LookupTable { .. } => "LookupTable",
-            SensorResponseModel::Custom { .. } => "Custom",
-        }
-    }
-
-    fn default_response_model_kind(kind: &str) -> SensorResponseModel {
-        match kind {
-            "Threshold" => SensorResponseModel::Threshold { threshold: 0.5 },
-            "Linear" => SensorResponseModel::Linear {
-                gain: 1.0,
-                offset: 0.0,
-            },
-            "Polynomial" => SensorResponseModel::Polynomial {
-                coefficients: vec![0.0, 1.0],
-            },
-            "LookupTable" => SensorResponseModel::LookupTable {
-                points: vec![
-                    SensorResponsePoint {
-                        input: 0.0,
-                        output: 0.0,
-                    },
-                    SensorResponsePoint {
-                        input: 1.0,
-                        output: 1.0,
-                    },
-                ],
-            },
-            "Custom" => SensorResponseModel::Custom {
-                description: String::new(),
-            },
-            _ => SensorResponseModel::Ideal,
-        }
-    }
-
-    fn edit_sensor_response_model_ui(
-        ui: &mut egui::Ui,
-        model: &mut SensorResponseModel,
-        idx: usize,
-    ) -> bool {
-        let mut changed = false;
-        let current = response_model_kind(model).to_string();
-        let mut selected = current.clone();
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Response model");
-            egui::ComboBox::from_id_source(format!("sensor_response_{idx}"))
-                .selected_text(selected.as_str())
-                .show_ui(ui, |ui| {
-                    for kind in [
-                        "Ideal",
-                        "Threshold",
-                        "Linear",
-                        "Polynomial",
-                        "LookupTable",
-                        "Custom",
-                    ] {
-                        ui.selectable_value(&mut selected, kind.to_string(), kind);
-                    }
-                });
-        });
-        if selected != current {
-            *model = default_response_model_kind(&selected);
-            changed = true;
-        }
-        ui.horizontal_wrapped(|ui| match model {
-            SensorResponseModel::Ideal => {
-                ui.label("Ideal response, no editable parameters.");
-            }
-            SensorResponseModel::Threshold { threshold } => {
-                ui.label("threshold");
-                if ui
-                    .add(egui::DragValue::new(threshold).speed(0.01))
-                    .changed()
-                {
-                    changed = true;
-                }
-            }
-            SensorResponseModel::Linear { gain, offset } => {
-                ui.label("gain/offset");
-                if ui.add(egui::DragValue::new(gain).speed(0.01)).changed() {
-                    changed = true;
-                }
-                if ui.add(egui::DragValue::new(offset).speed(0.01)).changed() {
-                    changed = true;
-                }
-            }
-            SensorResponseModel::Polynomial { coefficients } => {
-                if ui.button("Add coefficient").clicked() {
-                    coefficients.push(0.0);
-                    changed = true;
-                }
-                let mut remove = None;
-                for (i, coefficient) in coefficients.iter_mut().enumerate() {
-                    ui.label(format!("c{i}"));
-                    if ui
-                        .add(egui::DragValue::new(coefficient).speed(0.01))
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                    if ui.small_button("x").clicked() {
-                        remove = Some(i);
-                    }
-                }
-                if let Some(i) = remove {
-                    coefficients.remove(i);
-                    changed = true;
-                }
-            }
-            SensorResponseModel::LookupTable { points } => {
-                if ui.button("Add point").clicked() {
-                    points.push(SensorResponsePoint {
-                        input: 0.0,
-                        output: 0.0,
-                    });
-                    changed = true;
-                }
-                let mut remove = None;
-                for (i, point) in points.iter_mut().enumerate() {
-                    ui.label(format!("p{i}"));
-                    if ui
-                        .add(egui::DragValue::new(&mut point.input).speed(0.01))
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                    if ui
-                        .add(egui::DragValue::new(&mut point.output).speed(0.01))
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                    if ui.small_button("x").clicked() {
-                        remove = Some(i);
-                    }
-                }
-                if let Some(i) = remove {
-                    points.remove(i);
-                    changed = true;
-                }
-            }
-            SensorResponseModel::Custom { description } => {
-                ui.label("description");
-                if ui.text_edit_singleline(description).changed() {
-                    changed = true;
-                }
-            }
-        });
-        changed
-    }
-
-    fn ensure_asset_dir(dir: &str) -> PathBuf {
-        let path = std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(dir);
-        let _ = fs::create_dir_all(&path);
-        path
-    }
-
-    fn draw_robot_preview(
-        ui: &mut egui::Ui,
-        robot: &RobotConfig,
-        available_height: f32,
-        camera: &mut RobotPreviewCamera,
-    ) {
-        let desired = egui::vec2(ui.available_width(), available_height.max(260.0));
-        let (response, painter) = ui.allocate_painter(desired, egui::Sense::click_and_drag());
-        let rect = response.rect;
-        painter.rect_filled(
-            rect,
-            egui::Rounding::same(6.0),
-            egui::Color32::from_gray(22),
-        );
-        painter.rect_stroke(
-            rect,
-            egui::Rounding::same(6.0),
-            egui::Stroke::new(1.0, egui::Color32::from_gray(70)),
-        );
-
-        let base_bounds = robot_preview_base_bounds(robot);
-        camera.zoom = camera.zoom.clamp(camera.min_zoom, camera.max_zoom);
-        let mut bounds = camera.viewport_bounds(base_bounds);
-
-        if response.hovered() {
-            let scroll_y = ui.input(|i| i.raw_scroll_delta.y);
-            if scroll_y.abs() > 0.0 {
-                let pointer = ui.input(|i| i.pointer.hover_pos()).unwrap_or(rect.center());
-                let before = camera.screen_to_world(rect, bounds, pointer);
-                let factor = (scroll_y * 0.0015).exp();
-                camera.zoom = (camera.zoom * factor).clamp(camera.min_zoom, camera.max_zoom);
-                bounds = camera.viewport_bounds(base_bounds);
-                let after = camera.screen_to_world(rect, bounds, pointer);
-                camera.pan_m.x += before.x - after.x;
-                camera.pan_m.y += before.y - after.y;
-                bounds = camera.viewport_bounds(base_bounds);
-                ui.ctx().request_repaint();
-            }
-        }
-
-        let pan_button_down = ui.input(|i| {
-            i.pointer.button_down(egui::PointerButton::Middle)
-                || i.pointer.button_down(egui::PointerButton::Secondary)
-        });
-        if response.dragged() && pan_button_down {
-            let delta = ui.input(|i| i.pointer.delta());
-            let scale = world_screen_scale(rect, bounds).max(1e-9);
-            camera.pan_m.x -= delta.x as f64 / scale;
-            camera.pan_m.y += delta.y as f64 / scale;
-            bounds = camera.viewport_bounds(base_bounds);
-            ui.ctx().request_repaint();
-        }
-
-        ui.allocate_ui_at_rect(
-            egui::Rect::from_min_size(
-                rect.left_top() + egui::vec2(8.0, 8.0),
-                egui::vec2(260.0, 24.0),
-            ),
-            |ui| {
-                ui.horizontal(|ui| {
-                    if ui.small_button("Reset Zoom").clicked() {
-                        camera.reset();
-                    }
-                    if ui.small_button("Fit Robot").clicked() {
-                        camera.fit_rect();
-                    }
-                    if ui.small_button("Center View").clicked() {
-                        camera.center();
-                    }
-                });
-            },
-        );
-
-        draw_robot_preview_grid(&painter, rect, bounds);
-        draw_robot_envelope(&painter, rect, bounds);
-
-        let half_l = robot.chassis.length_m.max(0.001) * 0.5;
-        let half_w = robot.chassis.width_m.max(0.001) * 0.5;
-        let origin = camera.world_to_screen(rect, bounds, Vec2::new(0.0, 0.0));
-        let x_axis = camera.world_to_screen(rect, bounds, Vec2::new(0.150, 0.0));
-        let y_axis = camera.world_to_screen(rect, bounds, Vec2::new(0.0, 0.150));
-        painter.line_segment(
-            [origin, x_axis],
-            egui::Stroke::new(2.0, egui::Color32::from_rgb(210, 120, 60)),
-        );
-        painter.line_segment(
-            [origin, y_axis],
-            egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 160, 220)),
-        );
-        painter.text(
-            x_axis,
-            egui::Align2::LEFT_CENTER,
-            "+X front",
-            egui::FontId::proportional(11.0),
-            egui::Color32::from_rgb(230, 160, 100),
-        );
-        painter.text(
-            y_axis,
-            egui::Align2::CENTER_BOTTOM,
-            "+Y left",
-            egui::FontId::proportional(11.0),
-            egui::Color32::from_rgb(120, 190, 240),
-        );
-
-        let chassis = [
-            Vec2::new(half_l, half_w),
-            Vec2::new(half_l, -half_w),
-            Vec2::new(-half_l, -half_w),
-            Vec2::new(-half_l, half_w),
-        ];
-        let chassis_points: Vec<egui::Pos2> = chassis
-            .iter()
-            .map(|p| world_to_screen(rect, bounds, *p))
-            .collect();
-        painter.add(egui::Shape::convex_polygon(
-            chassis_points.clone(),
-            egui::Color32::from_rgb(48, 55, 64),
-            egui::Stroke::new(2.0, egui::Color32::from_rgb(170, 190, 210)),
-        ));
-        painter.add(egui::Shape::closed_line(
-            chassis_points,
-            egui::Stroke::new(2.0, egui::Color32::from_rgb(210, 220, 235)),
-        ));
-
-        for area in robot.line_validity_areas.iter().filter(|area| area.enabled) {
-            let points: Vec<_> = validity_area_points(area)
-                .iter()
-                .map(|point| world_to_screen(rect, bounds, *point))
-                .collect();
-            painter.add(egui::Shape::convex_polygon(
-                points.clone(),
-                egui::Color32::from_rgba_premultiplied(70, 220, 120, 45),
-                egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 230, 135)),
-            ));
-            if let Some(center) = points
-                .first()
-                .map(|_| world_to_screen(rect, bounds, area.position_m))
-            {
-                painter.text(
-                    center,
-                    egui::Align2::CENTER_CENTER,
-                    area.name.as_str(),
-                    egui::FontId::proportional(10.0),
-                    egui::Color32::from_rgb(150, 245, 180),
-                );
-            }
-        }
-
-        if robot.normal_force.chamber_area_m2 > 0.0 {
-            let side = robot
-                .normal_force
-                .chamber_area_m2
-                .sqrt()
-                .clamp(0.005, robot.chassis.width_m.max(0.005));
-            draw_preview_rect(
-                &painter,
-                rect,
-                bounds,
-                robot.normal_force.position_m,
-                side,
-                side,
-                egui::Color32::from_rgba_premultiplied(80, 120, 210, 70),
-                egui::Color32::from_rgb(90, 150, 240),
-            );
-        }
-
-        let wheel_len = (robot.drivetrain.wheel_radius_m * 2.0).max(0.005);
-        let wheel_w = robot.drivetrain.wheel_width_m.max(0.003);
-        for (x, label_x) in [
-            (-robot.drivetrain.wheelbase_m * 0.5, "R"),
-            (robot.drivetrain.wheelbase_m * 0.5, "F"),
-        ] {
-            for (y, label_y) in [
-                (-robot.drivetrain.track_width_m * 0.5, "Right"),
-                (robot.drivetrain.track_width_m * 0.5, "Left"),
-            ] {
-                draw_preview_rect(
-                    &painter,
-                    rect,
-                    bounds,
-                    Vec2::new(x, y),
-                    wheel_len,
-                    wheel_w,
-                    egui::Color32::from_rgb(30, 30, 34),
-                    egui::Color32::from_rgb(230, 230, 230),
-                );
-                let p = world_to_screen(rect, bounds, Vec2::new(x, y));
-                painter.text(
-                    p + egui::vec2(4.0, -4.0),
-                    egui::Align2::LEFT_BOTTOM,
-                    format!("{label_y} {label_x}"),
-                    egui::FontId::proportional(9.0),
-                    egui::Color32::from_gray(220),
-                );
-            }
-        }
-
-        for sensor in robot
-            .sensors
-            .iter()
-            .filter(|sensor| sensor.enabled && sensor.visible_in_preview)
-        {
-            draw_sensor_instance(&painter, rect, bounds, sensor);
-        }
-
-        let com = world_to_screen(rect, bounds, robot.chassis.center_of_mass_m);
-        painter.circle_stroke(
-            com,
-            7.0,
-            egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 220, 70)),
-        );
-        painter.line_segment(
-            [com + egui::vec2(-7.0, 0.0), com + egui::vec2(7.0, 0.0)],
-            egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 220, 70)),
-        );
-        painter.line_segment(
-            [com + egui::vec2(0.0, -7.0), com + egui::vec2(0.0, 7.0)],
-            egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 220, 70)),
-        );
-        painter.text(
-            com + egui::vec2(8.0, 8.0),
-            egui::Align2::LEFT_TOP,
-            "COM",
-            egui::FontId::proportional(11.0),
-            egui::Color32::from_rgb(255, 220, 70),
-        );
-
-        let nf = world_to_screen(rect, bounds, robot.normal_force.position_m);
-        let diamond = vec![
-            nf + egui::vec2(0.0, -7.0),
-            nf + egui::vec2(7.0, 0.0),
-            nf + egui::vec2(0.0, 7.0),
-            nf + egui::vec2(-7.0, 0.0),
-        ];
-        painter.add(egui::Shape::convex_polygon(
-            diamond,
-            egui::Color32::from_rgb(130, 100, 240),
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(210, 200, 255)),
-        ));
-        painter.text(
-            nf + egui::vec2(8.0, -8.0),
-            egui::Align2::LEFT_BOTTOM,
-            "Normal/downforce",
-            egui::FontId::proportional(10.0),
-            egui::Color32::from_rgb(210, 200, 255),
-        );
-
-        for (idx, fan) in robot.normal_force.fans.iter().enumerate() {
-            let fan_bounds = circle_bounds(fan.position_m, fan.visual_radius_m.max(0.012));
-            let inside = bounds_inside_envelope(fan_bounds);
-            let color = if inside {
-                egui::Color32::from_rgb(120, 200, 255)
-            } else {
-                egui::Color32::from_rgb(255, 90, 90)
-            };
-            let p = world_to_screen(rect, bounds, fan.position_m);
-            let r =
-                world_len_to_screen(rect, bounds, fan.visual_radius_m.max(0.012)).clamp(6.0, 22.0);
-            let action_r =
-                world_len_to_screen(rect, bounds, fan.action_radius_m.max(fan.visual_radius_m));
-            painter.circle_stroke(
-                p,
-                action_r,
-                egui::Stroke::new(
-                    1.0,
-                    egui::Color32::from_rgba_premultiplied(120, 200, 255, 80),
-                ),
-            );
-            painter.circle_stroke(p, r, egui::Stroke::new(2.0, color));
-            painter.line_segment(
-                [p + egui::vec2(-r, 0.0), p + egui::vec2(r, 0.0)],
-                egui::Stroke::new(1.0, color),
-            );
-            painter.line_segment(
-                [p + egui::vec2(0.0, -r), p + egui::vec2(0.0, r)],
-                egui::Stroke::new(1.0, color),
-            );
-            painter.text(
-                p + egui::vec2(r + 3.0, 0.0),
-                egui::Align2::LEFT_CENTER,
-                format!("Fan {idx}"),
-                egui::FontId::proportional(10.0),
-                color,
-            );
-        }
-
-        let outside_count = robot_components_outside_count(robot);
-        if outside_count > 0 {
-            painter.text(
-                rect.right_top() + egui::vec2(-10.0, 10.0),
-                egui::Align2::RIGHT_TOP,
-                format!("{outside_count} physical component(s) outside 250 × 250 mm"),
-                egui::FontId::proportional(12.0),
-                egui::Color32::from_rgb(255, 105, 90),
-            );
-        }
-
-        draw_preview_scale(&painter, rect, bounds);
-        painter.text(
-            rect.left_bottom() + egui::vec2(10.0, -10.0),
-            egui::Align2::LEFT_BOTTOM,
-            "Scroll: zoom | middle/right drag: pan | envelope: 250 mm × 250 mm",
-            egui::FontId::proportional(11.0),
-            egui::Color32::from_gray(150),
-        );
-    }
-
-    const ROBOT_ENVELOPE_HALF_M: f64 = 0.125;
-
-    fn robot_preview_base_bounds(robot: &RobotConfig) -> Bounds {
-        let mut b = Bounds {
-            min_x: -ROBOT_ENVELOPE_HALF_M,
-            max_x: ROBOT_ENVELOPE_HALF_M,
-            min_y: -ROBOT_ENVELOPE_HALF_M,
-            max_y: ROBOT_ENVELOPE_HALF_M,
-        };
-        include_bounds(
-            &mut b,
-            rect_bounds(
-                robot.chassis.center_of_mass_m,
-                robot.chassis.length_m,
-                robot.chassis.width_m,
-            ),
-        );
-
-        let wheel_len = (robot.drivetrain.wheel_radius_m * 2.0).max(0.005);
-        let wheel_w = robot.drivetrain.wheel_width_m.max(0.003);
-        for x in [
-            -robot.drivetrain.wheelbase_m * 0.5,
-            robot.drivetrain.wheelbase_m * 0.5,
-        ] {
-            for y in [
-                -robot.drivetrain.track_width_m * 0.5,
-                robot.drivetrain.track_width_m * 0.5,
-            ] {
-                include_bounds(&mut b, rect_bounds(Vec2::new(x, y), wheel_len, wheel_w));
-            }
-        }
-
-        if robot.normal_force.chamber_area_m2 > 0.0 {
-            let side = robot
-                .normal_force
-                .chamber_area_m2
-                .sqrt()
-                .clamp(0.005, 0.250);
-            include_bounds(
-                &mut b,
-                rect_bounds(robot.normal_force.position_m, side, side),
-            );
-        }
-        for fan in &robot.normal_force.fans {
-            include_bounds(
-                &mut b,
-                circle_bounds(fan.position_m, fan.visual_radius_m.max(0.012)),
-            );
-        }
-        for sensor in robot.sensors.iter().filter(|sensor| sensor.enabled) {
-            include_bounds(&mut b, sensor_physical_bounds(sensor));
-        }
-        for area in robot.line_validity_areas.iter().filter(|area| area.enabled) {
-            include_bounds(
-                &mut b,
-                tight_bounds_from_points(&validity_area_points(area)),
-            );
-        }
-
-        let margin_x = ((b.max_x - b.min_x) * 0.12).max(0.035);
-        let margin_y = ((b.max_y - b.min_y) * 0.12).max(0.035);
-        b.min_x -= margin_x;
-        b.max_x += margin_x;
-        b.min_y -= margin_y;
-        b.max_y += margin_y;
-        b
-    }
-
-    fn rect_bounds(center: Vec2, length_m: f64, width_m: f64) -> Bounds {
-        let half_l = length_m.max(0.0) * 0.5;
-        let half_w = width_m.max(0.0) * 0.5;
-        Bounds {
-            min_x: center.x - half_l,
-            max_x: center.x + half_l,
-            min_y: center.y - half_w,
-            max_y: center.y + half_w,
-        }
-    }
-
-    fn circle_bounds(center: Vec2, radius_m: f64) -> Bounds {
-        let r = radius_m.max(0.0);
-        Bounds {
-            min_x: center.x - r,
-            max_x: center.x + r,
-            min_y: center.y - r,
-            max_y: center.y + r,
-        }
-    }
-
-    fn include_bounds(dst: &mut Bounds, src: Bounds) {
-        dst.min_x = dst.min_x.min(src.min_x);
-        dst.max_x = dst.max_x.max(src.max_x);
-        dst.min_y = dst.min_y.min(src.min_y);
-        dst.max_y = dst.max_y.max(src.max_y);
-    }
-
-    fn tight_bounds_from_points(points: &[Vec2]) -> Bounds {
-        let mut min_x = f64::INFINITY;
-        let mut max_x = f64::NEG_INFINITY;
-        let mut min_y = f64::INFINITY;
-        let mut max_y = f64::NEG_INFINITY;
-        for p in points {
-            min_x = min_x.min(p.x);
-            max_x = max_x.max(p.x);
-            min_y = min_y.min(p.y);
-            max_y = max_y.max(p.y);
-        }
-        if !min_x.is_finite() || !max_x.is_finite() || !min_y.is_finite() || !max_y.is_finite() {
-            return Bounds {
-                min_x: 0.0,
-                max_x: 0.0,
-                min_y: 0.0,
-                max_y: 0.0,
-            };
-        }
-        Bounds {
-            min_x,
-            max_x,
-            min_y,
-            max_y,
-        }
-    }
-
-    fn bounds_inside_envelope(bounds: Bounds) -> bool {
-        let eps = 1e-9;
-        bounds.min_x >= -ROBOT_ENVELOPE_HALF_M - eps
-            && bounds.max_x <= ROBOT_ENVELOPE_HALF_M + eps
-            && bounds.min_y >= -ROBOT_ENVELOPE_HALF_M - eps
-            && bounds.max_y <= ROBOT_ENVELOPE_HALF_M + eps
-    }
-
-    fn robot_components_outside_count(robot: &RobotConfig) -> usize {
-        let mut outside = 0;
-        if !bounds_inside_envelope(rect_bounds(
-            robot.chassis.center_of_mass_m,
-            robot.chassis.length_m,
-            robot.chassis.width_m,
-        )) {
-            outside += 1;
-        }
-        let wheel_len = (robot.drivetrain.wheel_radius_m * 2.0).max(0.005);
-        let wheel_w = robot.drivetrain.wheel_width_m.max(0.003);
-        for x in [
-            -robot.drivetrain.wheelbase_m * 0.5,
-            robot.drivetrain.wheelbase_m * 0.5,
-        ] {
-            for y in [
-                -robot.drivetrain.track_width_m * 0.5,
-                robot.drivetrain.track_width_m * 0.5,
-            ] {
-                if !bounds_inside_envelope(rect_bounds(Vec2::new(x, y), wheel_len, wheel_w)) {
-                    outside += 1;
-                }
-            }
-        }
-        for fan in &robot.normal_force.fans {
-            if !bounds_inside_envelope(circle_bounds(
-                fan.position_m,
-                fan.visual_radius_m.max(0.012),
-            )) {
-                outside += 1;
-            }
-        }
-        for sensor in robot.sensors.iter().filter(|sensor| sensor.enabled) {
-            if !bounds_inside_envelope(sensor_physical_bounds(sensor)) {
-                outside += 1;
-            }
-        }
-        for area in robot.line_validity_areas.iter().filter(|area| area.enabled) {
-            if !bounds_inside_envelope(tight_bounds_from_points(&validity_area_points(area))) {
-                outside += 1;
-            }
-        }
-        outside
-    }
-
-    fn draw_robot_preview_grid(painter: &egui::Painter, rect: egui::Rect, bounds: Bounds) {
-        let scale = world_screen_scale(rect, bounds).max(1e-9);
-        let target_px = 44.0;
-        let raw_step_m = target_px / scale;
-        let step_m = nice_step_m(raw_step_m).clamp(0.001, 1.0);
-        let first_x = (bounds.min_x / step_m).floor() as i64 - 1;
-        let last_x = (bounds.max_x / step_m).ceil() as i64 + 1;
-        let first_y = (bounds.min_y / step_m).floor() as i64 - 1;
-        let last_y = (bounds.max_y / step_m).ceil() as i64 + 1;
-        for i in first_x..=last_x {
-            let x = i as f64 * step_m;
-            let p0 = world_to_screen(rect, bounds, Vec2::new(x, bounds.min_y));
-            let p1 = world_to_screen(rect, bounds, Vec2::new(x, bounds.max_y));
-            let color = if x.abs() < step_m * 0.5 {
-                egui::Color32::from_gray(80)
-            } else {
-                egui::Color32::from_gray(42)
-            };
-            painter.line_segment([p0, p1], egui::Stroke::new(1.0, color));
-        }
-        for i in first_y..=last_y {
-            let y = i as f64 * step_m;
-            let p0 = world_to_screen(rect, bounds, Vec2::new(bounds.min_x, y));
-            let p1 = world_to_screen(rect, bounds, Vec2::new(bounds.max_x, y));
-            let color = if y.abs() < step_m * 0.5 {
-                egui::Color32::from_gray(80)
-            } else {
-                egui::Color32::from_gray(42)
-            };
-            painter.line_segment([p0, p1], egui::Stroke::new(1.0, color));
-        }
-    }
-
-    fn nice_step_m(raw_m: f64) -> f64 {
-        let raw = raw_m.max(1e-6);
-        let exp = raw.log10().floor();
-        let base = 10_f64.powf(exp);
-        for mul in [1.0, 2.0, 5.0, 10.0] {
-            let step = base * mul;
-            if step >= raw {
-                return step;
-            }
-        }
-        base * 10.0
-    }
-
-    fn draw_robot_envelope(painter: &egui::Painter, rect: egui::Rect, bounds: Bounds) {
-        let corners = [
-            Vec2::new(ROBOT_ENVELOPE_HALF_M, ROBOT_ENVELOPE_HALF_M),
-            Vec2::new(ROBOT_ENVELOPE_HALF_M, -ROBOT_ENVELOPE_HALF_M),
-            Vec2::new(-ROBOT_ENVELOPE_HALF_M, -ROBOT_ENVELOPE_HALF_M),
-            Vec2::new(-ROBOT_ENVELOPE_HALF_M, ROBOT_ENVELOPE_HALF_M),
-        ];
-        let points: Vec<_> = corners
-            .iter()
-            .map(|p| world_to_screen(rect, bounds, *p))
-            .collect();
-        painter.add(egui::Shape::closed_line(
-            points.clone(),
-            egui::Stroke::new(2.0, egui::Color32::from_rgb(140, 170, 190)),
-        ));
-        let label_pos = points.first().copied().unwrap_or(rect.left_top()) + egui::vec2(4.0, -4.0);
-        painter.text(
-            label_pos,
-            egui::Align2::LEFT_BOTTOM,
-            "250 × 250 mm",
-            egui::FontId::proportional(11.0),
-            egui::Color32::from_rgb(170, 195, 215),
-        );
-    }
-
-    fn draw_preview_scale(painter: &egui::Painter, rect: egui::Rect, bounds: Bounds) {
-        let scale = world_screen_scale(rect, bounds).max(1e-9);
-        let desired_m = 100.0 / scale;
-        let scale_len_m = nice_step_m(desired_m).clamp(0.01, 0.5);
-        let len_px = (scale_len_m * scale) as f32;
-        let y = rect.bottom() - 28.0;
-        let x = rect.right() - len_px - 18.0;
-        let p0 = egui::pos2(x, y);
-        let p1 = egui::pos2(x + len_px, y);
-        painter.line_segment(
-            [p0, p1],
-            egui::Stroke::new(2.0, egui::Color32::from_gray(210)),
-        );
-        painter.line_segment(
-            [p0 + egui::vec2(0.0, -5.0), p0 + egui::vec2(0.0, 5.0)],
-            egui::Stroke::new(2.0, egui::Color32::from_gray(210)),
-        );
-        painter.line_segment(
-            [p1 + egui::vec2(0.0, -5.0), p1 + egui::vec2(0.0, 5.0)],
-            egui::Stroke::new(2.0, egui::Color32::from_gray(210)),
-        );
-        let label = if scale_len_m < 1.0 {
-            format!("{:.0} mm", scale_len_m * 1000.0)
-        } else {
-            format!("{:.1} m", scale_len_m)
-        };
-        painter.text(
-            p0 + egui::vec2(len_px * 0.5, -7.0),
-            egui::Align2::CENTER_BOTTOM,
-            label,
-            egui::FontId::proportional(11.0),
-            egui::Color32::from_gray(220),
-        );
-    }
-
-    fn sensor_center(sensor: &RobotSensorInstance) -> Vec2 {
-        sensor.position_m
-    }
-
-    fn validity_area_points(area: &RobotLineValidityArea) -> [Vec2; 4] {
-        let half_l = area.length_m.max(0.0001) * 0.5;
-        let half_w = area.width_m.max(0.0001) * 0.5;
-        let angle = area.angle_deg.to_radians();
-        let (s, c) = angle.sin_cos();
-        let transform = |x: f64, y: f64| {
-            Vec2::new(
-                area.position_m.x + x * c - y * s,
-                area.position_m.y + x * s + y * c,
-            )
-        };
-        [
-            transform(half_l, half_w),
-            transform(half_l, -half_w),
-            transform(-half_l, -half_w),
-            transform(-half_l, half_w),
-        ]
-    }
-
-    fn sensor_rotate(sensor: &RobotSensorInstance, local: Vec2) -> Vec2 {
-        let a = sensor.angle_deg.to_radians();
-        let (s, c) = a.sin_cos();
-        Vec2::new(
-            sensor.position_m.x + local.x * c - local.y * s,
-            sensor.position_m.y + local.x * s + local.y * c,
-        )
-    }
-
-    fn sensor_oriented_rect_points(
-        sensor: &RobotSensorInstance,
-        length_m: f64,
-        width_m: f64,
-    ) -> [Vec2; 4] {
-        let half_l = length_m.max(0.001) * 0.5;
-        let half_w = width_m.max(0.001) * 0.5;
-        [
-            sensor_rotate(sensor, Vec2::new(half_l, half_w)),
-            sensor_rotate(sensor, Vec2::new(half_l, -half_w)),
-            sensor_rotate(sensor, Vec2::new(-half_l, -half_w)),
-            sensor_rotate(sensor, Vec2::new(-half_l, half_w)),
-        ]
-    }
-
-    fn sensor_physical_bounds(sensor: &RobotSensorInstance) -> Bounds {
-        if sensor.asset.visual_radius_m > 0.0 {
-            return circle_bounds(sensor_center(sensor), sensor.asset.visual_radius_m);
-        }
-        let pts = sensor_oriented_rect_points(
-            sensor,
-            sensor.asset.visual_height_m.max(0.001),
-            sensor.asset.visual_width_m.max(0.001),
-        );
-        tight_bounds_from_points(&pts)
-    }
-
-    fn sensor_type_color(sensor_type: SensorType) -> egui::Color32 {
-        match sensor_type {
-            SensorType::LineAnalog | SensorType::LineDigital => {
-                egui::Color32::from_rgb(95, 210, 120)
-            }
-            SensorType::DistanceInfrared | SensorType::DistanceToF | SensorType::Ultrasonic => {
-                egui::Color32::from_rgb(240, 185, 80)
-            }
-            SensorType::Color => egui::Color32::from_rgb(220, 120, 220),
-            SensorType::Encoder => egui::Color32::from_rgb(150, 200, 255),
-            SensorType::Gyro | SensorType::Accelerometer => egui::Color32::from_rgb(175, 150, 255),
-            SensorType::Custom => egui::Color32::from_rgb(210, 210, 210),
-        }
-    }
-
-    fn draw_sensor_instance(
-        painter: &egui::Painter,
-        rect: egui::Rect,
-        bounds: Bounds,
-        sensor: &RobotSensorInstance,
-    ) {
-        draw_sensor_detection_area(painter, rect, bounds, sensor);
-        let sensor_bounds = sensor_physical_bounds(sensor);
-        let inside = bounds_inside_envelope(sensor_bounds);
-        let base = sensor_type_color(sensor.asset.sensor_type);
-        let stroke = if inside {
-            base
-        } else {
-            egui::Color32::from_rgb(255, 95, 90)
-        };
-        let center = world_to_screen(rect, bounds, sensor.position_m);
-        let angle = sensor.angle_deg.to_radians();
-        let forward = egui::vec2(angle.cos() as f32, -angle.sin() as f32);
-        if sensor.asset.visual_radius_m > 0.0 {
-            let r =
-                world_len_to_screen(rect, bounds, sensor.asset.visual_radius_m).clamp(4.0, 18.0);
-            painter.circle_filled(
-                center,
-                r,
-                egui::Color32::from_rgba_premultiplied(base.r(), base.g(), base.b(), 55),
-            );
-            painter.circle_stroke(center, r, egui::Stroke::new(1.5, stroke));
-            painter.line_segment(
-                [center, center + forward * r],
-                egui::Stroke::new(1.4, stroke),
-            );
-        } else {
-            let pts = sensor_oriented_rect_points(
-                sensor,
-                sensor.asset.visual_height_m.max(0.001),
-                sensor.asset.visual_width_m.max(0.001),
-            );
-            let points: Vec<_> = pts
-                .iter()
-                .map(|p| world_to_screen(rect, bounds, *p))
-                .collect();
-            painter.add(egui::Shape::convex_polygon(
-                points,
-                egui::Color32::from_rgba_premultiplied(base.r(), base.g(), base.b(), 55),
-                egui::Stroke::new(1.5, stroke),
-            ));
-            painter.line_segment(
-                [
-                    center,
-                    center
-                        + forward
-                            * world_len_to_screen(
-                                rect,
-                                bounds,
-                                sensor.asset.visual_height_m.max(0.008) * 0.5,
-                            ),
-                ],
-                egui::Stroke::new(1.2, stroke),
-            );
-        }
-        let min_size_px = world_len_to_screen(
-            rect,
-            bounds,
-            sensor
-                .asset
-                .visual_width_m
-                .max(sensor.asset.visual_height_m)
-                .max(sensor.asset.visual_radius_m),
-        );
-        if min_size_px > 12.0 && !sensor.name.is_empty() {
-            painter.text(
-                center + egui::vec2(4.0, -4.0),
-                egui::Align2::LEFT_BOTTOM,
-                sensor.name.as_str(),
-                egui::FontId::proportional(9.5),
-                stroke,
-            );
-        }
-    }
-
-    fn draw_sensor_detection_area(
-        painter: &egui::Painter,
-        rect: egui::Rect,
-        bounds: Bounds,
-        sensor: &RobotSensorInstance,
-    ) {
-        let color = sensor_type_color(sensor.asset.sensor_type);
-        let stroke = egui::Stroke::new(
-            1.0,
-            egui::Color32::from_rgba_premultiplied(color.r(), color.g(), color.b(), 90),
-        );
-        match &sensor.asset.detection_area {
-            SensorDetectionArea::Point { radius_m } | SensorDetectionArea::Circle { radius_m } => {
-                painter.circle_stroke(
-                    world_to_screen(rect, bounds, sensor.position_m),
-                    world_len_to_screen(rect, bounds, *radius_m).max(2.0),
-                    stroke,
-                );
-            }
-            SensorDetectionArea::Rectangle { width_m, height_m } => {
-                let pts = sensor_oriented_rect_points(sensor, *height_m, *width_m);
-                let points: Vec<_> = pts
-                    .iter()
-                    .map(|p| world_to_screen(rect, bounds, *p))
-                    .collect();
-                painter.add(egui::Shape::closed_line(points, stroke));
-            }
-            SensorDetectionArea::Cone { range_m, angle_deg } => {
-                let center = world_to_screen(rect, bounds, sensor.position_m);
-                let steps = 18;
-                let half = angle_deg.to_radians() * 0.5;
-                let base = sensor.angle_deg.to_radians();
-                let mut points = vec![center];
-                for i in 0..=steps {
-                    let t = -half + (2.0 * half) * (i as f64 / steps as f64);
-                    let a = base + t;
-                    let world = Vec2::new(
-                        sensor.position_m.x + range_m * a.cos(),
-                        sensor.position_m.y + range_m * a.sin(),
-                    );
-                    points.push(world_to_screen(rect, bounds, world));
-                }
-                painter.add(egui::Shape::closed_line(points, stroke));
-            }
-            SensorDetectionArea::CustomPolygon { points_m } => {
-                if points_m.len() >= 2 {
-                    let points: Vec<_> = points_m
-                        .iter()
-                        .map(|p| world_to_screen(rect, bounds, sensor_rotate(sensor, *p)))
-                        .collect();
-                    painter.add(egui::Shape::closed_line(points, stroke));
-                }
-            }
-        }
-    }
-
-    fn draw_preview_rect(
-        painter: &egui::Painter,
-        rect: egui::Rect,
-        bounds: Bounds,
-        center: Vec2,
-        length_m: f64,
-        width_m: f64,
-        fill: egui::Color32,
-        stroke: egui::Color32,
-    ) {
-        let half_l = length_m * 0.5;
-        let half_w = width_m * 0.5;
-        let corners = [
-            Vec2::new(center.x + half_l, center.y + half_w),
-            Vec2::new(center.x + half_l, center.y - half_w),
-            Vec2::new(center.x - half_l, center.y - half_w),
-            Vec2::new(center.x - half_l, center.y + half_w),
-        ];
-        let points: Vec<egui::Pos2> = corners
-            .iter()
-            .map(|p| world_to_screen(rect, bounds, *p))
-            .collect();
-        painter.add(egui::Shape::convex_polygon(
-            points,
-            fill,
-            egui::Stroke::new(1.0, stroke),
-        ));
-    }
-
     fn nav_button(ui: &mut egui::Ui, current: &mut AppView, target: AppView, label: &str) {
         if ui.selectable_label(*current == target, label).clicked() {
             *current = target;
@@ -6026,6 +3644,7 @@ mod gui {
         invalidate: &mut bool,
     ) {
         ui.group(|ui| {
+            ui.strong(title);
             ui.horizontal(|ui| {
                 ui.label("Model");
                 if ui.text_edit_singleline(&mut motor.model).changed() {
@@ -6057,6 +3676,17 @@ mod gui {
                 }
             });
             ui.horizontal(|ui| {
+                ui.label("Tensao nominal [V]");
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut motor.nominal_voltage_v)
+                            .speed(0.1)
+                            .clamp_range(0.1..=1000.0),
+                    )
+                    .changed()
+                {
+                    *invalidate = true;
+                }
                 ui.label("RPM no load");
                 if ui
                     .add(
@@ -6173,7 +3803,7 @@ mod gui {
         let mut zoom = 1.0;
         let mut pan_m = Vec2::new(0.0, 0.0);
         draw_track_view_with_height_zoomable(
-            ui, track, robot_pose, trail, height, &mut zoom, &mut pan_m,
+            ui, track, robot_pose, trail, height, &mut zoom, &mut pan_m, None,
         );
     }
 
@@ -6185,6 +3815,7 @@ mod gui {
         height: f32,
         zoom: &mut f32,
         pan_m: &mut Vec2,
+        robot: Option<&RobotConfig>,
     ) {
         let desired = egui::vec2(ui.available_width(), height.max(220.0));
         let (response, painter) = ui.allocate_painter(desired, egui::Sense::click_and_drag());
@@ -6219,7 +3850,17 @@ mod gui {
             ui.ctx().request_repaint();
         }
 
-        draw_track_geometry(&painter, rect, bounds, track, robot_pose, trail);
+        draw_track_geometry(
+            &painter,
+            rect,
+            bounds,
+            track,
+            if robot.is_some() { None } else { robot_pose },
+            trail,
+        );
+        if let (Some(robot), Some(pose)) = (robot, robot_pose) {
+            draw_assembly_world(&painter, rect, bounds, robot, pose);
+        }
 
         let help = "Scroll: zoom | arraste: mover | Fit: reset";
         painter.text(
@@ -6271,7 +3912,12 @@ mod gui {
         robot_pose: Option<Pose2>,
         trail: &[TelemetrySample],
     ) {
+        draw_track_substrate(painter, rect, bounds, track);
         draw_grid(painter, rect, bounds, track);
+        let runtime = cached_track(painter.ctx(), track).ok();
+        if let Some(runtime) = &runtime {
+            draw_surface_regions(painter, rect, bounds, runtime);
+        }
         if track.centerline.len() >= 2 {
             let px_width = world_len_to_screen(rect, bounds, track.line_width_m).max(2.0);
             for w in track.centerline.windows(2) {
@@ -6279,7 +3925,14 @@ mod gui {
                 let b = world_to_screen(rect, bounds, w[1]);
                 painter.line_segment(
                     [a, b],
-                    egui::Stroke::new(px_width, egui::Color32::from_rgb(245, 245, 245)),
+                    egui::Stroke::new(px_width, {
+                        let c = track
+                            .parametric
+                            .as_ref()
+                            .map(|p| crate::track::definition::display_color(&p.surface.line_color))
+                            .unwrap_or([245, 245, 245]);
+                        egui::Color32::from_rgb(c[0], c[1], c[2])
+                    }),
                 );
                 painter.line_segment(
                     [a, b],
@@ -6304,72 +3957,15 @@ mod gui {
                 egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 160, 255)),
             );
 
-            let geometry = build_geometry(parametric);
-            if let Some(resolved) = resolve_start_finish_markers(parametric) {
-                if let Some(corners) = robot_start_allowed_area_corners(parametric) {
-                    draw_robot_start_allowed_area(painter, rect, bounds, corners);
-                }
-                if let Some(robot_start_pose) = resolve_robot_start_pose(parametric) {
-                    draw_robot_start_pose(painter, rect, bounds, robot_start_pose);
-                }
-                draw_track_marker(
-                    painter,
-                    rect,
-                    bounds,
-                    resolved.start_pose,
-                    "START",
-                    egui::Color32::from_rgb(80, 220, 120),
-                    MarkerSide::Right,
-                    track.line_width_m,
-                );
-                draw_track_marker(
-                    painter,
-                    rect,
-                    bounds,
-                    resolved.finish_pose,
-                    "FINISH",
-                    egui::Color32::from_rgb(255, 200, 70),
-                    MarkerSide::Right,
-                    track.line_width_m,
-                );
+            if let Some(corners) = robot_start_allowed_area_corners(parametric) {
+                draw_robot_start_allowed_area(painter, rect, bounds, corners);
             }
-            if parametric.markings.corner_markers.auto_generate {
-                let reverse = !parametric
-                    .markings
-                    .start_finish
-                    .exit_direction
-                    .is_increasing_s();
-                for seg in &geometry.segment_poses {
-                    if seg.kind == "arc" {
-                        let mut start_pose = seg.start;
-                        let mut end_pose = seg.end;
-                        if reverse {
-                            start_pose.heading_deg += 180.0;
-                            end_pose.heading_deg += 180.0;
-                        }
-                        draw_track_marker(
-                            painter,
-                            rect,
-                            bounds,
-                            start_pose,
-                            "CM",
-                            egui::Color32::from_rgb(120, 200, 255),
-                            MarkerSide::Left,
-                            track.line_width_m,
-                        );
-                        draw_track_marker(
-                            painter,
-                            rect,
-                            bounds,
-                            end_pose,
-                            "CM",
-                            egui::Color32::from_rgb(120, 200, 255),
-                            MarkerSide::Left,
-                            track.line_width_m,
-                        );
-                    }
-                }
+            if let Some(pose) = resolve_robot_start_pose(parametric) {
+                draw_robot_start_pose(painter, rect, bounds, pose);
             }
+        }
+        if let Some(runtime) = &runtime {
+            draw_optical_marks(painter, rect, bounds, runtime);
         }
         if trail.len() >= 2 {
             let stride = (trail.len() / 2000).max(1);
@@ -6491,51 +4087,6 @@ mod gui {
             "ROBOT START",
             egui::FontId::proportional(10.0),
             egui::Color32::from_rgb(230, 120, 80),
-        );
-    }
-
-    fn draw_track_marker(
-        painter: &egui::Painter,
-        rect: egui::Rect,
-        bounds: Bounds,
-        pose: crate::rtsim_track::TrackPose,
-        label: &str,
-        color: egui::Color32,
-        side: MarkerSide,
-        line_width_m: f64,
-    ) {
-        let p = Vec2::new(pose.x_mm / 1000.0, pose.y_mm / 1000.0);
-        let theta = pose.heading_deg.to_radians();
-        let left_normal = Vec2::new(-theta.sin(), theta.cos());
-        let side_sign = match side {
-            MarkerSide::Left => 1.0,
-            MarkerSide::Right => -1.0,
-            MarkerSide::Center => 0.0,
-        };
-        let lateral_offset_m = side_sign * (line_width_m * 0.5 + 0.04);
-        let center = Vec2::new(
-            p.x + left_normal.x * lateral_offset_m,
-            p.y + left_normal.y * lateral_offset_m,
-        );
-        let half_marker_len_m = 0.02;
-        let a_world = Vec2::new(
-            center.x - left_normal.x * half_marker_len_m,
-            center.y - left_normal.y * half_marker_len_m,
-        );
-        let b_world = Vec2::new(
-            center.x + left_normal.x * half_marker_len_m,
-            center.y + left_normal.y * half_marker_len_m,
-        );
-        let a = world_to_screen(rect, bounds, a_world);
-        let b = world_to_screen(rect, bounds, b_world);
-        let pos = world_to_screen(rect, bounds, center);
-        painter.line_segment([a, b], egui::Stroke::new(3.0, color));
-        painter.text(
-            pos + egui::vec2(6.0, 6.0),
-            egui::Align2::LEFT_TOP,
-            label,
-            egui::FontId::proportional(11.0),
-            color,
         );
     }
 
@@ -6777,14 +4328,6 @@ mod gui {
             .unwrap_or_else(|| cfg.project_path.with_extension("rtlog"))
     }
 
-    fn default_csv_path(cfg: &LoadedConfig) -> PathBuf {
-        cfg.project
-            .csv_output
-            .as_ref()
-            .map(|p| resolve_child_path(&cfg.project_path, p))
-            .unwrap_or_else(|| cfg.project_path.with_extension("csv"))
-    }
-
     fn resolve_child_path(project_path: &Path, child: &Path) -> PathBuf {
         if child.is_absolute() {
             child.to_path_buf()
@@ -6845,1125 +4388,10 @@ mod gui {
         }
     }
 
-    fn save_track_to_file(track: &TrackConfig, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        fs::write(path, track_json(track)).map_err(|e| e.to_string())
-    }
-
-    fn save_surface_profile_to_file(profile: &SurfaceProfile, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        fs::write(path, surface_profile_json(profile)).map_err(|e| e.to_string())
-    }
-
-    fn save_robot_to_file(robot: &RobotConfig, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        fs::write(path, robot_json(robot)).map_err(|e| e.to_string())
-    }
-
-    fn save_motor_profile_to_file(profile: &MotorProfile, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        fs::write(path, motor_profile_json(profile)).map_err(|e| e.to_string())
-    }
-
-    fn save_driver_profile_to_file(profile: &DriverProfile, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        fs::write(path, driver_profile_json(profile)).map_err(|e| e.to_string())
-    }
-
-    fn save_battery_profile_to_file(profile: &BatteryProfile, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        fs::write(path, battery_profile_json(profile)).map_err(|e| e.to_string())
-    }
-
-    fn save_tire_profile_to_file(profile: &TireProfile, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        fs::write(path, tire_profile_json(profile)).map_err(|e| e.to_string())
-    }
-
-    fn save_encoder_profile_to_file(profile: &EncoderProfile, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        fs::write(path, encoder_profile_json(profile)).map_err(|e| e.to_string())
-    }
-
-    fn save_gyro_profile_to_file(profile: &GyroProfile, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        fs::write(path, gyro_profile_json(profile)).map_err(|e| e.to_string())
-    }
-
-    fn save_sensor_asset_to_file(asset: &SensorAsset, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        fs::write(path, sensor_asset_json(asset, 0)).map_err(|e| e.to_string())
-    }
-
-    fn save_fan_profile_to_file(profile: &FanProfile, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        fs::write(path, fan_profile_json(profile)).map_err(|e| e.to_string())
-    }
-
-    fn save_loaded_config(cfg: &LoadedConfig) -> Result<(), String> {
-        if let Some(track) = &cfg.track.parametric {
-            if track.rules.mode == TrackRulesMode::Strict {
-                let errors: Vec<_> = validate_track(track)
-                    .into_iter()
-                    .filter(|issue| issue.severity == Severity::Error)
-                    .collect();
-                if !errors.is_empty() {
-                    return Err(format!(
-                        "modo strict bloqueou o salvamento: {}",
-                        errors
-                            .iter()
-                            .take(3)
-                            .map(|issue| issue.message.as_str())
-                            .collect::<Vec<_>>()
-                            .join("; ")
-                    ));
-                }
-            }
-        }
-        let base_dir = cfg.project_path.parent().unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(base_dir).map_err(|e| e.to_string())?;
-        let robot_path = resolve_child_path(&cfg.project_path, &cfg.project.robot_path);
-        let track_path = resolve_child_path(&cfg.project_path, &cfg.project.track_path);
-        if let Some(parent) = robot_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        if let Some(parent) = track_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        fs::write(&cfg.project_path, project_json(&cfg.project)).map_err(|e| e.to_string())?;
-        fs::write(&robot_path, robot_json(&cfg.robot)).map_err(|e| e.to_string())?;
-        fs::write(&track_path, track_json(&cfg.track)).map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    fn project_json(project: &ProjectConfig) -> String {
-        let mut out = String::new();
-        out.push_str("{\n");
-        out.push_str(&format!(
-            "  \"rtsim_schema\": \"{}\",\n",
-            escape_json(&project.schema)
-        ));
-        out.push_str(&format!(
-            "  \"name\": \"{}\",\n",
-            escape_json(&project.name)
-        ));
-        out.push_str(&format!(
-            "  \"robot\": \"{}\",\n",
-            escape_json(&RTSimApp::path_text(&project.robot_path))
-        ));
-        out.push_str(&format!(
-            "  \"track\": \"{}\",\n",
-            escape_json(&RTSimApp::path_text(&project.track_path))
-        ));
-        out.push_str("  \"time\": {\n");
-        out.push_str(&format!(
-            "    \"physics_dt_us\": {},\n",
-            project.time.physics_dt_us
-        ));
-        out.push_str(&format!(
-            "    \"controller_period_us\": {},\n",
-            project.time.controller_period_us
-        ));
-        out.push_str(&format!(
-            "    \"sensor_period_us\": {},\n",
-            project.time.sensor_period_us
-        ));
-        out.push_str(&format!(
-            "    \"imu_period_us\": {},\n",
-            project.time.imu_period_us
-        ));
-        out.push_str(&format!(
-            "    \"encoder_period_us\": {},\n",
-            project.time.encoder_period_us
-        ));
-        out.push_str(&format!(
-            "    \"log_period_us\": {},\n",
-            project.time.log_period_us
-        ));
-        out.push_str(&format!(
-            "    \"render_period_us\": {}\n",
-            project.time.render_period_us
-        ));
-        out.push_str("  },\n");
-        out.push_str("  \"simulation\": {\n");
-        out.push_str(&format!("    \"duration_s\": {:.9},\n", project.duration_s));
-        out.push_str(&format!(
-            "    \"start_pose_m\": [{:.9}, {:.9}, {:.9}]\n",
-            project.start_pose.x, project.start_pose.y, project.start_pose.yaw
-        ));
-        out.push_str("  },\n");
-        out.push_str("  \"log\": {\n");
-        out.push_str(&format!(
-            "    \"csv\": \"{}\",\n",
-            escape_json(
-                &project
-                    .csv_output
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "resultado.csv".to_string())
-            )
-        ));
-        out.push_str(&format!(
-            "    \"replay\": \"{}\"\n",
-            escape_json(
-                &project
-                    .replay_output
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "resultado.rtlog".to_string())
-            )
-        ));
-        out.push_str("  }\n}\n");
-        out
-    }
-
-    fn motor_profile_json(profile: &MotorProfile) -> String {
-        format!(
-            "{{\n  \"motor_profile_schema\": \"{}\",\n  \"name\": \"{}\",\n  \"motor\": {}\n}}\n",
-            escape_json(&profile.schema),
-            escape_json(&profile.name),
-            motor_json(&profile.motor, 2)
-        )
-    }
-
-    fn driver_profile_json(profile: &DriverProfile) -> String {
-        format!(
-            "{{\n  \"driver_profile_schema\": \"{}\",\n  \"name\": \"{}\",\n  \"driver\": {}\n}}\n",
-            escape_json(&profile.schema),
-            escape_json(&profile.name),
-            driver_json(&profile.driver, 2)
-        )
-    }
-
-    fn battery_profile_json(profile: &BatteryProfile) -> String {
-        format!(
-            "{{\n  \"battery_profile_schema\": \"{}\",\n  \"name\": \"{}\",\n  \"battery\": {}\n}}\n",
-            escape_json(&profile.schema),
-            escape_json(&profile.name),
-            battery_json(&profile.battery, 2)
-        )
-    }
-
-    fn tire_profile_json(profile: &TireProfile) -> String {
-        format!(
-            "{{\n  \"tire_profile_schema\": \"{}\",\n  \"name\": \"{}\",\n  \"tire\": {}\n}}\n",
-            escape_json(&profile.schema),
-            escape_json(&profile.name),
-            tire_json(&profile.tire, 2)
-        )
-    }
-
-    fn encoder_profile_json(profile: &EncoderProfile) -> String {
-        format!(
-            "{{\n  \"encoder_profile_schema\": \"{}\",\n  \"name\": \"{}\",\n  \"encoder\": {}\n}}\n",
-            escape_json(&profile.schema),
-            escape_json(&profile.name),
-            encoder_json(&profile.encoder, 2)
-        )
-    }
-
-    fn gyro_profile_json(profile: &GyroProfile) -> String {
-        format!(
-            "{{\n  \"gyro_profile_schema\": \"{}\",\n  \"name\": \"{}\",\n  \"gyro\": {}\n}}\n",
-            escape_json(&profile.schema),
-            escape_json(&profile.name),
-            gyro_json(&profile.gyro, 2)
-        )
-    }
-
-    fn fan_profile_json(profile: &FanProfile) -> String {
-        format!(
-            "{{\n  \"fan_profile_schema\": \"{}\",\n  \"name\": \"{}\",\n  \"fan\": {}\n}}\n",
-            escape_json(&profile.schema),
-            escape_json(&profile.name),
-            fan_json(&profile.fan, 2)
-        )
-    }
-
-    fn robot_json(robot: &RobotConfig) -> String {
-        let mut out = String::new();
-        out.push_str("{\n");
-        out.push_str(&format!(
-            "  \"robot_schema\": \"{}\",\n",
-            escape_json(&robot.schema)
-        ));
-        out.push_str(&format!("  \"name\": \"{}\",\n", escape_json(&robot.name)));
-        out.push_str("  \"chassis\": {\n");
-        out.push_str(&format!("    \"model\": \"RigidBody2DChassis\",\n    \"mass_g\": {:.6},\n    \"inertia_kg_m2\": {:.12},\n    \"center_of_mass_mm\": [{:.6}, {:.6}],\n    \"length_mm\": {:.6},\n    \"width_mm\": {:.6}\n  }},\n",
-            robot.chassis.mass_kg * 1000.0,
-            robot.chassis.inertia_kg_m2,
-            robot.chassis.center_of_mass_m.x * 1000.0,
-            robot.chassis.center_of_mass_m.y * 1000.0,
-            robot.chassis.length_m * 1000.0,
-            robot.chassis.width_m * 1000.0));
-        out.push_str(&normal_force_json(&robot.normal_force));
-        out.push_str(",\n  \"drivetrain\": {\n");
-        out.push_str(&format!("    \"type\": \"DifferentialDrive4Wheel\",\n    \"wheel_radius_mm\": {:.6},\n    \"wheel_width_mm\": {:.6},\n    \"track_width_mm\": {:.6},\n    \"wheelbase_mm\": {:.6},\n    \"wheel_inertia_g_cm2\": {:.9}\n  }},\n",
-            robot.drivetrain.wheel_radius_m * 1000.0,
-            robot.drivetrain.wheel_width_m * 1000.0,
-            robot.drivetrain.track_width_m * 1000.0,
-            robot.drivetrain.wheelbase_m * 1000.0,
-            robot.drivetrain.wheel_inertia_kg_m2 / 1e-7));
-        out.push_str(&format!("  \"tire\": {{\n    \"model\": \"{}\",\n    \"mu_longitudinal\": {:.9},\n    \"mu_lateral\": {:.9},\n    \"rolling_resistance\": {:.9},\n    \"slip_velocity_epsilon_m_s\": {:.9}\n  }},\n",
-            escape_json(&robot.tire.model), robot.tire.mu_longitudinal, robot.tire.mu_lateral, robot.tire.rolling_resistance, robot.tire.slip_velocity_epsilon_m_s));
-        out.push_str("  \"motors\": {\n");
-        out.push_str(&format!(
-            "    \"left\": {},\n",
-            motor_json(&robot.motor_left, 4)
-        ));
-        out.push_str(&format!(
-            "    \"right\": {}\n  }},\n",
-            motor_json(&robot.motor_right, 4)
-        ));
-        out.push_str(&format!("  \"driver\": {{\n    \"model\": \"{}\",\n    \"pwm_frequency_hz\": {:.6},\n    \"mode\": \"{}\",\n    \"voltage_drop_v\": {:.9},\n    \"pwm_resolution_bits\": {},\n    \"command_deadband\": {:.9},\n    \"current_limit_a\": {:.9}\n  }},\n",
-            escape_json(&robot.driver.model), robot.driver.pwm_frequency_hz, escape_json(&robot.driver.mode), robot.driver.voltage_drop_v, robot.driver.pwm_resolution_bits, robot.driver.command_deadband, robot.driver.current_limit_a));
-        out.push_str(&format!("  \"battery\": {{\n    \"model\": \"{}\",\n    \"nominal_voltage_v\": {:.9},\n    \"full_voltage_v\": {:.9},\n    \"empty_voltage_v\": {:.9},\n    \"cells\": {},\n    \"capacity_mah\": {:.9},\n    \"internal_resistance_ohm\": {:.9},\n    \"initial_soc\": {:.9},\n    \"current_limit_a\": {:.9}\n  }},\n",
-            escape_json(&robot.battery.model), robot.battery.nominal_voltage_v, robot.battery.full_voltage_v, robot.battery.empty_voltage_v, robot.battery.cells, robot.battery.capacity_mah, robot.battery.internal_resistance_ohm, robot.battery.initial_soc, robot.battery.current_limit_a));
-        out.push_str(&format!(
-            "  \"sensors\": {},\n",
-            robot_sensors_json(&robot.sensors, 2)
-        ));
-        out.push_str(&format!(
-            "  \"line_validity_areas\": {},\n",
-            robot_line_validity_areas_json(&robot.line_validity_areas, 2)
-        ));
-        out.push_str(&format!("  \"encoder\": {{\n    \"model\": \"{}\",\n    \"ticks_per_rev\": {},\n    \"invert_left\": {},\n    \"invert_right\": {}\n  }},\n",
-            escape_json(&robot.encoder.model), robot.encoder.ticks_per_rev, robot.encoder.invert_left, robot.encoder.invert_right));
-        out.push_str(&format!("  \"gyro\": {{\n    \"model\": \"{}\",\n    \"noise_std_rad_s\": {:.9},\n    \"bias_rad_s\": {:.9},\n    \"saturation_rad_s\": {:.9},\n    \"seed\": {}\n  }},\n",
-            escape_json(&robot.gyro.model), robot.gyro.noise_std_rad_s, robot.gyro.bias_rad_s, robot.gyro.saturation_rad_s, robot.gyro.seed));
-        out.push_str(&format!("  \"controller\": {{\n    \"model\": \"BuiltInPid\",\n    \"kp\": {:.9},\n    \"ki\": {:.9},\n    \"kd\": {:.9},\n    \"base_pwm\": {:.9},\n    \"max_pwm\": {:.9},\n    \"target_position_mm\": {:.9},\n    \"downforce_pwm\": {:.9}\n  }}\n}}\n",
-            robot.controller.kp, robot.controller.ki, robot.controller.kd, robot.controller.base_pwm, robot.controller.max_pwm, robot.controller.target_position_m * 1000.0, robot.controller.downforce_pwm));
-        out
-    }
-
-    fn normal_force_json(normal: &NormalForceConfig) -> String {
-        let mut out = String::new();
-        out.push_str("  \"normal_force\": {\n");
-        out.push_str(&format!(
-            "    \"model\": \"{}\",\n",
-            escape_json(&normal.model)
-        ));
-        out.push_str(&format!(
-            "    \"downforce_model\": {},\n",
-            downforce_model_json(&normal.model_kind, 4)
-        ));
-        out.push_str(&format!(
-            "    \"default_pwm\": {:.9},\n",
-            normal.command_pwm_default
-        ));
-        out.push_str(&format!(
-            "    \"position_mm\": [{:.6}, {:.6}],\n",
-            normal.position_m.x * 1000.0,
-            normal.position_m.y * 1000.0
-        ));
-        out.push_str(&format!(
-            "    \"max_force_n\": {:.9},\n",
-            normal.max_force_n
-        ));
-        out.push_str(&format!(
-            "    \"max_current_a\": {:.9},\n",
-            normal.max_current_a
-        ));
-        out.push_str(&format!(
-            "    \"response_time_s\": {:.9},\n",
-            normal.response_time_s
-        ));
-        out.push_str(&format!(
-            "    \"chamber_area_m2\": {:.9},\n",
-            normal.chamber_area_m2
-        ));
-        out.push_str(&format!(
-            "    \"max_delta_pressure_pa\": {:.9},\n",
-            normal.max_delta_pressure_pa
-        ));
-        out.push_str(&format!(
-            "    \"leakage_factor\": {:.9},\n",
-            normal.leakage_factor
-        ));
-        out.push_str(&format!(
-            "    \"speed_sensitivity\": {:.9},\n",
-            normal.speed_sensitivity
-        ));
-        out.push_str(&format!(
-            "    \"force_curve\": {},\n",
-            curve_json(&normal.force_curve)
-        ));
-        out.push_str("    \"fans\": [");
-        if !normal.fans.is_empty() {
-            out.push('\n');
-            for (idx, fan) in normal.fans.iter().enumerate() {
-                if idx > 0 {
-                    out.push_str(",\n");
-                }
-                out.push_str(&fan_json(fan, 6));
-            }
-            out.push('\n');
-            out.push_str("    ");
-        }
-        out.push_str("]\n  }");
-        out
-    }
-
-    fn motor_json(motor: &MotorConfig, indent: usize) -> String {
-        let pad = " ".repeat(indent);
-        format!(
-            "{{\n{pad}  \"model\": \"{}\",\n{pad}  \"gear_ratio\": {:.9},\n{pad}  \"efficiency\": {:.9},\n{pad}  \"no_load_rpm\": {:.9},\n{pad}  \"stall_torque_mnm\": {:.9},\n{pad}  \"stall_current_a\": {:.9}\n{pad}}}",
-            escape_json(&motor.model),
-            motor.gear_ratio,
-            motor.efficiency,
-            motor.no_load_rpm,
-            motor.stall_torque_nm * 1000.0,
-            motor.stall_current_a,
-        )
-    }
-
-    fn driver_json(driver: &DriverConfig, indent: usize) -> String {
-        let pad = " ".repeat(indent);
-        format!(
-            "{{\n{pad}  \"model\": \"{}\",\n{pad}  \"pwm_frequency_hz\": {:.6},\n{pad}  \"mode\": \"{}\",\n{pad}  \"voltage_drop_v\": {:.9},\n{pad}  \"pwm_resolution_bits\": {},\n{pad}  \"command_deadband\": {:.9},\n{pad}  \"current_limit_a\": {:.9}\n{pad}}}",
-            escape_json(&driver.model),
-            driver.pwm_frequency_hz,
-            escape_json(&driver.mode),
-            driver.voltage_drop_v,
-            driver.pwm_resolution_bits,
-            driver.command_deadband,
-            driver.current_limit_a
-        )
-    }
-
-    fn battery_json(battery: &BatteryConfig, indent: usize) -> String {
-        let pad = " ".repeat(indent);
-        format!(
-            "{{\n{pad}  \"model\": \"{}\",\n{pad}  \"nominal_voltage_v\": {:.9},\n{pad}  \"full_voltage_v\": {:.9},\n{pad}  \"empty_voltage_v\": {:.9},\n{pad}  \"cells\": {},\n{pad}  \"capacity_mah\": {:.9},\n{pad}  \"internal_resistance_ohm\": {:.9},\n{pad}  \"initial_soc\": {:.9},\n{pad}  \"current_limit_a\": {:.9}\n{pad}}}",
-            escape_json(&battery.model),
-            battery.nominal_voltage_v,
-            battery.full_voltage_v,
-            battery.empty_voltage_v,
-            battery.cells,
-            battery.capacity_mah,
-            battery.internal_resistance_ohm,
-            battery.initial_soc,
-            battery.current_limit_a
-        )
-    }
-
-    fn tire_json(tire: &TireConfig, indent: usize) -> String {
-        let pad = " ".repeat(indent);
-        format!(
-            "{{\n{pad}  \"model\": \"{}\",\n{pad}  \"mu_longitudinal\": {:.9},\n{pad}  \"mu_lateral\": {:.9},\n{pad}  \"rolling_resistance\": {:.9},\n{pad}  \"slip_velocity_epsilon_m_s\": {:.9}\n{pad}}}",
-            escape_json(&tire.model),
-            tire.mu_longitudinal,
-            tire.mu_lateral,
-            tire.rolling_resistance,
-            tire.slip_velocity_epsilon_m_s
-        )
-    }
-
-    fn encoder_json(encoder: &EncoderConfig, indent: usize) -> String {
-        let pad = " ".repeat(indent);
-        format!(
-            "{{\n{pad}  \"model\": \"{}\",\n{pad}  \"ticks_per_rev\": {},\n{pad}  \"invert_left\": {},\n{pad}  \"invert_right\": {}\n{pad}}}",
-            escape_json(&encoder.model),
-            encoder.ticks_per_rev,
-            encoder.invert_left,
-            encoder.invert_right,
-        )
-    }
-
-    fn gyro_json(gyro: &GyroConfig, indent: usize) -> String {
-        let pad = " ".repeat(indent);
-        format!(
-            "{{\n{pad}  \"model\": \"{}\",\n{pad}  \"noise_std_rad_s\": {:.9},\n{pad}  \"bias_rad_s\": {:.9},\n{pad}  \"saturation_rad_s\": {:.9},\n{pad}  \"seed\": {}\n{pad}}}",
-            escape_json(&gyro.model),
-            gyro.noise_std_rad_s,
-            gyro.bias_rad_s,
-            gyro.saturation_rad_s,
-            gyro.seed,
-        )
-    }
-
-    fn robot_sensors_json(sensors: &[RobotSensorInstance], indent: usize) -> String {
-        let pad = " ".repeat(indent);
-        let mut out = String::from("[");
-        if !sensors.is_empty() {
-            out.push('\n');
-            for (idx, sensor) in sensors.iter().enumerate() {
-                if idx > 0 {
-                    out.push_str(",\n");
-                }
-                out.push_str(&robot_sensor_instance_json(sensor, indent + 2));
-            }
-            out.push('\n');
-            out.push_str(&pad);
-        }
-        out.push(']');
-        out
-    }
-
-    fn robot_sensor_instance_json(sensor: &RobotSensorInstance, indent: usize) -> String {
-        let pad = " ".repeat(indent);
-        let asset_path = sensor.asset_path.to_string_lossy().replace('\\', "/");
-        format!(
-            "{pad}{{\n{pad}  \"name\": \"{}\",\n{pad}  \"asset_path\": \"{}\",\n{pad}  \"position_mm\": [{:.6}, {:.6}],\n{pad}  \"angle_deg\": {:.9},\n{pad}  \"enabled\": {},\n{pad}  \"visible_in_preview\": {}\n{pad}}}",
-            escape_json(&sensor.name),
-            escape_json(&asset_path),
-            sensor.position_m.x * 1000.0,
-            sensor.position_m.y * 1000.0,
-            sensor.angle_deg,
-            sensor.enabled,
-            sensor.visible_in_preview
-        )
-    }
-
-    fn robot_line_validity_areas_json(areas: &[RobotLineValidityArea], indent: usize) -> String {
-        let pad = " ".repeat(indent);
-        let item_pad = " ".repeat(indent + 2);
-        let mut out = String::from("[");
-        if !areas.is_empty() {
-            out.push('\n');
-            for (idx, area) in areas.iter().enumerate() {
-                if idx > 0 {
-                    out.push_str(",\n");
-                }
-                out.push_str(&format!(
-                    "{item_pad}{{\n{item_pad}  \"name\": \"{}\",\n{item_pad}  \"position_mm\": [{:.6}, {:.6}],\n{item_pad}  \"length_mm\": {:.6},\n{item_pad}  \"width_mm\": {:.6},\n{item_pad}  \"angle_deg\": {:.9},\n{item_pad}  \"enabled\": {}\n{item_pad}}}",
-                    escape_json(&area.name),
-                    area.position_m.x * 1000.0,
-                    area.position_m.y * 1000.0,
-                    area.length_m * 1000.0,
-                    area.width_m * 1000.0,
-                    area.angle_deg,
-                    area.enabled,
-                ));
-            }
-            out.push('\n');
-            out.push_str(&pad);
-        }
-        out.push(']');
-        out
-    }
-
-    fn sensor_asset_json(asset: &SensorAsset, indent: usize) -> String {
-        let pad = " ".repeat(indent);
-        format!(
-            "{{\n{pad}  \"name\": \"{}\",\n{pad}  \"model\": \"{}\",\n{pad}  \"sensor_type\": \"{}\",\n{pad}  \"visual_width_mm\": {:.6},\n{pad}  \"visual_height_mm\": {:.6},\n{pad}  \"visual_radius_mm\": {:.6},\n{pad}  \"detection_area\": {},\n{pad}  \"response_model\": {},\n{pad}  \"notes\": \"{}\"\n{pad}}}",
-            escape_json(&asset.name),
-            escape_json(&asset.model),
-            asset.sensor_type.as_str(),
-            asset.visual_width_m * 1000.0,
-            asset.visual_height_m * 1000.0,
-            asset.visual_radius_m * 1000.0,
-            sensor_detection_area_json(&asset.detection_area, indent + 2),
-            sensor_response_model_json(&asset.response_model, indent + 2),
-            escape_json(&asset.notes)
-        )
-    }
-
-    fn sensor_detection_area_json(area: &SensorDetectionArea, indent: usize) -> String {
-        let pad = " ".repeat(indent);
-        match area {
-            SensorDetectionArea::Point { radius_m } => format!(
-                "{{\n{pad}  \"kind\": \"Point\",\n{pad}  \"radius_mm\": {:.6}\n{pad}}}",
-                radius_m * 1000.0
-            ),
-            SensorDetectionArea::Rectangle { width_m, height_m } => format!(
-                "{{\n{pad}  \"kind\": \"Rectangle\",\n{pad}  \"width_mm\": {:.6},\n{pad}  \"height_mm\": {:.6}\n{pad}}}",
-                width_m * 1000.0,
-                height_m * 1000.0
-            ),
-            SensorDetectionArea::Circle { radius_m } => format!(
-                "{{\n{pad}  \"kind\": \"Circle\",\n{pad}  \"radius_mm\": {:.6}\n{pad}}}",
-                radius_m * 1000.0
-            ),
-            SensorDetectionArea::Cone { range_m, angle_deg } => format!(
-                "{{\n{pad}  \"kind\": \"Cone\",\n{pad}  \"range_mm\": {:.6},\n{pad}  \"angle_deg\": {:.9}\n{pad}}}",
-                range_m * 1000.0,
-                angle_deg
-            ),
-            SensorDetectionArea::CustomPolygon { points_m } => {
-                let mut out = format!("{{\n{pad}  \"kind\": \"CustomPolygon\",\n{pad}  \"points_mm\": [");
-                for (idx, p) in points_m.iter().enumerate() {
-                    if idx > 0 {
-                        out.push_str(", ");
-                    }
-                    out.push_str(&format!("[{:.6}, {:.6}]", p.x * 1000.0, p.y * 1000.0));
-                }
-                out.push_str(&format!("]\n{pad}}}"));
-                out
-            }
-        }
-    }
-
-    fn sensor_response_model_json(model: &SensorResponseModel, indent: usize) -> String {
-        let pad = " ".repeat(indent);
-        match model {
-            SensorResponseModel::Ideal => "\"Ideal\"".to_string(),
-            SensorResponseModel::Threshold { threshold } => format!(
-                "{{\n{pad}  \"kind\": \"Threshold\",\n{pad}  \"threshold\": {:.9}\n{pad}}}",
-                threshold
-            ),
-            SensorResponseModel::Linear { gain, offset } => format!(
-                "{{\n{pad}  \"kind\": \"Linear\",\n{pad}  \"gain\": {:.9},\n{pad}  \"offset\": {:.9}\n{pad}}}",
-                gain,
-                offset
-            ),
-            SensorResponseModel::Polynomial { coefficients } => format!(
-                "{{\n{pad}  \"kind\": \"Polynomial\",\n{pad}  \"coefficients\": {}\n{pad}}}",
-                number_vec_json(coefficients)
-            ),
-            SensorResponseModel::LookupTable { points } => {
-                let mut out = format!("{{\n{pad}  \"kind\": \"LookupTable\",\n{pad}  \"points\": [");
-                for (idx, point) in points.iter().enumerate() {
-                    if idx > 0 {
-                        out.push_str(", ");
-                    }
-                    out.push_str(&format!("[{:.9}, {:.9}]", point.input, point.output));
-                }
-                out.push_str(&format!("]\n{pad}}}"));
-                out
-            }
-            SensorResponseModel::Custom { description } => format!(
-                "{{\n{pad}  \"kind\": \"Custom\",\n{pad}  \"description\": \"{}\"\n{pad}}}",
-                escape_json(description)
-            ),
-        }
-    }
-
-    fn number_vec_json(values: &[f64]) -> String {
-        let mut out = String::from("[");
-        for (idx, value) in values.iter().enumerate() {
-            if idx > 0 {
-                out.push_str(", ");
-            }
-            out.push_str(&format!("{:.9}", value));
-        }
-        out.push(']');
-        out
-    }
-
-    fn downforce_model_json(model: &DownforceModel, indent: usize) -> String {
-        let pad = " ".repeat(indent);
-        match model {
-            DownforceModel::None => "\"None\"".to_string(),
-            DownforceModel::Constant { force_n } => format!(
-                "{{\n{pad}  \"kind\": \"Constant\",\n{pad}  \"force_n\": {:.9}\n{pad}}}",
-                force_n
-            ),
-            DownforceModel::LinearVoltage { k_n_per_v, offset_n, max_force_n } => format!(
-                "{{\n{pad}  \"kind\": \"LinearVoltage\",\n{pad}  \"k_n_per_v\": {:.9},\n{pad}  \"offset_n\": {:.9},\n{pad}  \"max_force_n\": {:.9}\n{pad}}}",
-                k_n_per_v, offset_n, max_force_n
-            ),
-            DownforceModel::LinearCurrent { k_n_per_a, offset_n, max_force_n } => format!(
-                "{{\n{pad}  \"kind\": \"LinearCurrent\",\n{pad}  \"k_n_per_a\": {:.9},\n{pad}  \"offset_n\": {:.9},\n{pad}  \"max_force_n\": {:.9}\n{pad}}}",
-                k_n_per_a, offset_n, max_force_n
-            ),
-            DownforceModel::Exponential { a, b, max_force_n } => format!(
-                "{{\n{pad}  \"kind\": \"Exponential\",\n{pad}  \"a\": {:.9},\n{pad}  \"b\": {:.9},\n{pad}  \"max_force_n\": {:.9}\n{pad}}}",
-                a, b, max_force_n
-            ),
-            DownforceModel::Polynomial { coefficients, max_force_n } => format!(
-                "{{\n{pad}  \"kind\": \"Polynomial\",\n{pad}  \"coefficients\": {},\n{pad}  \"max_force_n\": {:.9}\n{pad}}}",
-                number_vec_json(coefficients), max_force_n
-            ),
-            DownforceModel::LookupTable { points } => {
-                let mut out = format!("{{\n{pad}  \"kind\": \"LookupTable\",\n{pad}  \"points\": [");
-                for (idx, point) in points.iter().enumerate() {
-                    if idx > 0 {
-                        out.push_str(", ");
-                    }
-                    out.push_str(&format!("[{:.9}, {:.9}]", point.input, point.force_n));
-                }
-                out.push_str(&format!("]\n{pad}}}"));
-                out
-            }
-            DownforceModel::Fan { nominal_voltage_v, nominal_current_a, max_force_n, curve, response_time_s } => format!(
-                "{{\n{pad}  \"kind\": \"Fan\",\n{pad}  \"nominal_voltage_v\": {:.9},\n{pad}  \"nominal_current_a\": {:.9},\n{pad}  \"max_force_n\": {:.9},\n{pad}  \"curve\": \"{}\",\n{pad}  \"response_time_s\": {:.9}\n{pad}}}",
-                nominal_voltage_v, nominal_current_a, max_force_n, curve.as_str(), response_time_s
-            ),
-        }
-    }
-
-    fn fan_json(fan: &FanConfig, indent: usize) -> String {
-        let pad = " ".repeat(indent);
-        format!(
-            "{{\n{pad}  \"position_mm\": [{:.6}, {:.6}],\n{pad}  \"visual_radius_mm\": {:.6},\n{pad}  \"action_radius_mm\": {:.6},\n{pad}  \"max_force_n\": {:.9},\n{pad}  \"max_current_a\": {:.9},\n{pad}  \"nominal_voltage_v\": {:.9},\n{pad}  \"nominal_current_a\": {:.9},\n{pad}  \"power_w\": {:.9},\n{pad}  \"min_pwm\": {:.9},\n{pad}  \"max_pwm\": {:.9},\n{pad}  \"response_time_s\": {:.9},\n{pad}  \"pwm_scale\": {:.9},\n{pad}  \"pwm\": {:.9},\n{pad}  \"curve_model\": \"{}\",\n{pad}  \"force_curve\": {}\n{pad}}}",
-            fan.position_m.x * 1000.0,
-            fan.position_m.y * 1000.0,
-            fan.visual_radius_m * 1000.0,
-            fan.action_radius_m * 1000.0,
-            fan.max_force_n,
-            fan.max_current_a,
-            fan.nominal_voltage_v,
-            fan.nominal_current_a,
-            fan.power_w,
-            fan.min_pwm,
-            fan.max_pwm,
-            fan.response_time_s,
-            fan.pwm_scale,
-            fan.enabled_pwm,
-            fan.curve_model.as_str(),
-            curve_json(&fan.force_curve)
-        )
-    }
-
-    fn track_json(track: &TrackConfig) -> String {
-        if let Some(v2) = &track.parametric {
-            return track_v2_json(v2);
-        }
-        let mut out = String::new();
-        out.push_str("{\n");
-        out.push_str(&format!(
-            "  \"track_schema\": \"{}\",\n",
-            escape_json(&track.schema)
-        ));
-        out.push_str(&format!("  \"name\": \"{}\",\n", escape_json(&track.name)));
-        out.push_str(&format!(
-            "  \"model\": \"{}\",\n",
-            escape_json(&track.model)
-        ));
-        out.push_str(&format!(
-            "  \"line_width_mm\": {:.6},\n",
-            track.line_width_m * 1000.0
-        ));
-        out.push_str(&format!(
-            "  \"base_reflectance\": {:.9},\n",
-            track.base_reflectance
-        ));
-        out.push_str(&format!(
-            "  \"line_reflectance\": {:.9},\n",
-            track.line_reflectance
-        ));
-        out.push_str(&format!("  \"surface_mu\": {:.9},\n", track.surface_mu));
-        out.push_str("  \"centerline_m\": [\n");
-        for (i, p) in track.centerline.iter().enumerate() {
-            let suffix = if i + 1 == track.centerline.len() {
-                ""
-            } else {
-                ","
-            };
-            out.push_str(&format!("    [{:.9}, {:.9}]{}\n", p.x, p.y, suffix));
-        }
-        out.push_str("  ]\n}\n");
-        out
-    }
-
-    fn track_v2_json(track: &TrackV2) -> String {
-        let mut out = String::new();
-        out.push_str("{\n");
-        out.push_str(&format!(
-            "  \"track_schema\": \"{}\",\n",
-            escape_json(&track.schema)
-        ));
-        out.push_str(&format!("  \"name\": \"{}\",\n", escape_json(&track.name)));
-        out.push_str(&format!(
-            "  \"units\": \"{}\",\n",
-            escape_json(&track.units)
-        ));
-        out.push_str("  \"area\": {\n");
-        out.push_str(&format!("    \"width_mm\": {:.6},\n", track.area.width_mm));
-        out.push_str(&format!(
-            "    \"height_mm\": {:.6},\n",
-            track.area.height_mm
-        ));
-        out.push_str(&format!("    \"grid_mm\": {:.6}\n", track.area.grid_mm));
-        out.push_str("  },\n");
-        out.push_str("  \"origin\": {\n");
-        out.push_str(&format!("    \"x_mm\": {:.6},\n", track.origin.x_mm));
-        out.push_str(&format!("    \"y_mm\": {:.6},\n", track.origin.y_mm));
-        out.push_str(&format!(
-            "    \"heading_deg\": {:.9}\n",
-            track.origin.heading_deg
-        ));
-        out.push_str("  },\n");
-        out.push_str("  \"rules\": {\n");
-        out.push_str(&format!(
-            "    \"profile\": \"{}\",\n",
-            escape_json(&track.rules.profile)
-        ));
-        out.push_str(&format!(
-            "    \"mode\": \"{}\",\n",
-            track.rules.mode.as_str()
-        ));
-        out.push_str("    \"overrides\": {");
-        let mut fields = Vec::new();
-        push_opt_num(
-            &mut fields,
-            "line_width_mm",
-            track.rules.overrides.line_width_mm,
-        );
-        push_opt_num(
-            &mut fields,
-            "max_total_length_mm",
-            track.rules.overrides.max_total_length_mm,
-        );
-        push_opt_num(
-            &mut fields,
-            "min_arc_radius_mm",
-            track.rules.overrides.min_arc_radius_mm,
-        );
-        push_opt_num(
-            &mut fields,
-            "min_distance_between_curvature_changes_mm",
-            track
-                .rules
-                .overrides
-                .min_distance_between_curvature_changes_mm,
-        );
-        push_opt_num(
-            &mut fields,
-            "intersection_angle_deg",
-            track.rules.overrides.intersection_angle_deg,
-        );
-        push_opt_num(
-            &mut fields,
-            "intersection_angle_tolerance_deg",
-            track.rules.overrides.intersection_angle_tolerance_deg,
-        );
-        push_opt_num(
-            &mut fields,
-            "min_straight_around_intersection_mm",
-            track.rules.overrides.min_straight_around_intersection_mm,
-        );
-        push_opt_bool(
-            &mut fields,
-            "start_finish_must_be_on_straight",
-            track.rules.overrides.start_finish_must_be_on_straight,
-        );
-        push_opt_num(
-            &mut fields,
-            "min_straight_around_start_finish_mm",
-            track.rules.overrides.min_straight_around_start_finish_mm,
-        );
-        push_opt_num(
-            &mut fields,
-            "start_goal_distance_mm",
-            track.rules.overrides.start_goal_distance_mm,
-        );
-        push_opt_num(
-            &mut fields,
-            "start_goal_area_half_width_mm",
-            track.rules.overrides.start_goal_area_half_width_mm,
-        );
-        push_opt_num(
-            &mut fields,
-            "min_table_edge_clearance_mm",
-            track.rules.overrides.min_table_edge_clearance_mm,
-        );
-        push_opt_num(
-            &mut fields,
-            "max_slope_deg",
-            track.rules.overrides.max_slope_deg,
-        );
-        if fields.is_empty() {
-            out.push_str("}\n");
-        } else {
-            out.push('\n');
-            for (i, field) in fields.iter().enumerate() {
-                let suffix = if i + 1 == fields.len() { "" } else { "," };
-                out.push_str(&format!("      {}{}\n", field, suffix));
-            }
-            out.push_str("    }\n");
-        }
-        out.push_str("  },\n");
-        out.push_str("  \"surface\": {\n");
-        out.push_str(&format!(
-            "    \"base_color\": \"{}\",\n",
-            escape_json(&track.surface.base_color)
-        ));
-        out.push_str(&format!(
-            "    \"line_color\": \"{}\",\n",
-            escape_json(&track.surface.line_color)
-        ));
-        out.push_str(&format!(
-            "    \"base_reflectance\": {:.9},\n",
-            track.surface.base_reflectance
-        ));
-        out.push_str(&format!(
-            "    \"line_reflectance\": {:.9},\n",
-            track.surface.line_reflectance
-        ));
-        out.push_str(&format!(
-            "    \"surface_mu\": {:.9}\n",
-            track.surface.surface_mu
-        ));
-        out.push_str("  },\n");
-        out.push_str("  \"segments\": [\n");
-        for (i, segment) in track.segments.iter().enumerate() {
-            let suffix = if i + 1 == track.segments.len() {
-                ""
-            } else {
-                ","
-            };
-            match segment {
-                TrackSegment::Straight(straight) => {
-                    out.push_str(&format!(
-                        "    {{ \"id\": \"{}\", \"kind\": \"straight\", \"length_mm\": {:.6} }}{}\n",
-                        escape_json(&straight.id), straight.length_mm, suffix
-                    ));
-                }
-                TrackSegment::Arc(arc) => {
-                    out.push_str(&format!(
-                        "    {{ \"id\": \"{}\", \"kind\": \"arc\", \"radius_mm\": {:.6}, \"sweep_deg\": {:.9} }}{}\n",
-                        escape_json(&arc.id), arc.radius_mm, arc.sweep_deg, suffix
-                    ));
-                }
-            }
-        }
-        out.push_str("  ],\n");
-        out.push_str("  \"closure\": {\n");
-        out.push_str(&format!("    \"required\": {},\n", track.closure.required));
-        out.push_str(&format!(
-            "    \"position_tolerance_mm\": {:.6},\n",
-            track.closure.position_tolerance_mm
-        ));
-        out.push_str(&format!(
-            "    \"heading_tolerance_deg\": {:.9}\n",
-            track.closure.heading_tolerance_deg
-        ));
-        out.push_str("  },\n");
-        out.push_str("  \"markings\": {\n");
-        out.push_str("    \"start_finish\": {\n");
-        out.push_str(&format!(
-            "      \"enabled\": {},\n",
-            track.markings.start_finish.enabled
-        ));
-        out.push_str(&format!(
-            "      \"segment_id\": \"{}\",\n",
-            escape_json(&track.markings.start_finish.segment_id)
-        ));
-        out.push_str(&format!(
-            "      \"start_s_mm\": {:.6},\n",
-            track.markings.start_finish.start_s_mm
-        ));
-        out.push_str(&format!(
-            "      \"distance_mm\": {:.6},\n",
-            track.markings.start_finish.distance_mm
-        ));
-        out.push_str(&format!(
-            "      \"margin_mm\": {:.6},\n",
-            track.markings.start_finish.margin_mm
-        ));
-        out.push_str(&format!(
-            "      \"exit_direction\": \"{}\",\n",
-            track.markings.start_finish.exit_direction.as_str()
-        ));
-        out.push_str("      \"robot_start\": {\n");
-        out.push_str(&format!(
-            "        \"delta_x_mm\": {:.6},\n",
-            track.markings.start_finish.robot_start.delta_x_mm
-        ));
-        out.push_str(&format!(
-            "        \"delta_y_mm\": {:.6},\n",
-            track.markings.start_finish.robot_start.delta_y_mm
-        ));
-        out.push_str(&format!(
-            "        \"heading_deg\": {:.9}\n",
-            track.markings.start_finish.robot_start.heading_deg
-        ));
-        out.push_str("      }\n");
-        out.push_str("    },\n");
-        out.push_str("    \"corner_markers\": {\n");
-        out.push_str(&format!(
-            "      \"auto_generate\": {}\n",
-            track.markings.corner_markers.auto_generate
-        ));
-        out.push_str("    }\n");
-        out.push_str("  }\n");
-        out.push_str("}\n");
-        out
-    }
-
-    fn surface_profile_json(profile: &SurfaceProfile) -> String {
-        let mut out = String::new();
-        out.push_str("{\n");
-        out.push_str(&format!(
-            "  \"surface_profile_schema\": \"{}\",\n",
-            escape_json(&profile.schema)
-        ));
-        out.push_str(&format!(
-            "  \"name\": \"{}\",\n",
-            escape_json(&profile.name)
-        ));
-        if let Some(line_width_mm) = profile.line_width_mm {
-            out.push_str(&format!("  \"line_width_mm\": {:.9},\n", line_width_mm));
-        }
-        out.push_str(&format!(
-            "  \"background_reflectance\": {:.9},\n",
-            profile.background_reflectance
-        ));
-        out.push_str(&format!(
-            "  \"line_reflectance\": {:.9},\n",
-            profile.line_reflectance
-        ));
-        out.push_str(&format!(
-            "  \"marker_profile\": \"{}\",\n",
-            escape_json(&profile.marker_profile)
-        ));
-        out.push_str("  \"rules\": {\n");
-        out.push_str(&format!(
-            "    \"mode\": \"{}\",\n",
-            profile.rules_mode.as_str()
-        ));
-        out.push_str("    \"overrides\": {");
-        let mut fields = Vec::new();
-        push_opt_num(
-            &mut fields,
-            "line_width_mm",
-            profile.overrides.line_width_mm,
-        );
-        push_opt_num(
-            &mut fields,
-            "max_total_length_mm",
-            profile.overrides.max_total_length_mm,
-        );
-        push_opt_num(
-            &mut fields,
-            "min_arc_radius_mm",
-            profile.overrides.min_arc_radius_mm,
-        );
-        push_opt_num(
-            &mut fields,
-            "min_distance_between_curvature_changes_mm",
-            profile.overrides.min_distance_between_curvature_changes_mm,
-        );
-        push_opt_num(
-            &mut fields,
-            "intersection_angle_deg",
-            profile.overrides.intersection_angle_deg,
-        );
-        push_opt_num(
-            &mut fields,
-            "intersection_angle_tolerance_deg",
-            profile.overrides.intersection_angle_tolerance_deg,
-        );
-        push_opt_num(
-            &mut fields,
-            "min_straight_around_intersection_mm",
-            profile.overrides.min_straight_around_intersection_mm,
-        );
-        push_opt_bool(
-            &mut fields,
-            "start_finish_must_be_on_straight",
-            profile.overrides.start_finish_must_be_on_straight,
-        );
-        push_opt_num(
-            &mut fields,
-            "min_straight_around_start_finish_mm",
-            profile.overrides.min_straight_around_start_finish_mm,
-        );
-        push_opt_num(
-            &mut fields,
-            "start_goal_distance_mm",
-            profile.overrides.start_goal_distance_mm,
-        );
-        push_opt_num(
-            &mut fields,
-            "start_goal_area_half_width_mm",
-            profile.overrides.start_goal_area_half_width_mm,
-        );
-        push_opt_num(
-            &mut fields,
-            "min_table_edge_clearance_mm",
-            profile.overrides.min_table_edge_clearance_mm,
-        );
-        push_opt_num(
-            &mut fields,
-            "max_slope_deg",
-            profile.overrides.max_slope_deg,
-        );
-        if fields.is_empty() {
-            out.push_str("}\n");
-        } else {
-            out.push('\n');
-            for (i, field) in fields.iter().enumerate() {
-                let suffix = if i + 1 == fields.len() { "" } else { "," };
-                out.push_str(&format!("      {}{}\n", field, suffix));
-            }
-            out.push_str("    }\n");
-        }
-        out.push_str("  },\n");
-        out.push_str("  \"surface\": {\n");
-        out.push_str(&format!(
-            "    \"base_color\": \"{}\",\n",
-            escape_json(&profile.base_color)
-        ));
-        out.push_str(&format!(
-            "    \"line_color\": \"{}\",\n",
-            escape_json(&profile.line_color)
-        ));
-        out.push_str(&format!(
-            "    \"base_reflectance\": {:.9},\n",
-            profile.background_reflectance
-        ));
-        out.push_str(&format!(
-            "    \"line_reflectance\": {:.9},\n",
-            profile.line_reflectance
-        ));
-        out.push_str(&format!("    \"surface_mu\": {:.9}\n", profile.surface_mu));
-        out.push_str("  }\n");
-        out.push_str("}\n");
-        out
-    }
-
-    fn push_opt_num(fields: &mut Vec<String>, key: &str, value: Option<f64>) {
-        if let Some(value) = value {
-            fields.push(format!("\"{}\": {:.9}", key, value));
-        }
-    }
-
-    fn push_opt_bool(fields: &mut Vec<String>, key: &str, value: Option<bool>) {
-        if let Some(value) = value {
-            fields.push(format!("\"{}\": {}", key, value));
-        }
-    }
-
-    fn curve_json(curve: &[(f64, f64)]) -> String {
-        let mut out = String::from("[");
-        for (idx, (x, y)) in curve.iter().enumerate() {
-            if idx > 0 {
-                out.push_str(", ");
-            }
-            out.push_str(&format!("[{:.9}, {:.9}]", x, y));
-        }
-        out.push(']');
-        out
-    }
-
-    fn escape_json(input: &str) -> String {
-        input
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r")
-            .replace('\t', "\\t")
-    }
-
     fn default_loaded_config(project_path: PathBuf) -> LoadedConfig {
         let project = ProjectConfig {
             schema: "rtsim-project-v1".to_string(),
-            name: "novo-projeto-v0.5".to_string(),
+            name: "novo-projeto-atual".to_string(),
             robot_path: PathBuf::from("robot.json"),
             track_path: PathBuf::from("track.json"),
             time: TimeConfig::default(),
@@ -7973,7 +4401,11 @@ mod gui {
             replay_output: Some(PathBuf::from("resultado.rtlog")),
         };
         let robot = RobotConfig {
-            schema: "rtsim-robot-v6".to_string(),
+            sensing: Default::default(),
+            powertrain: None,
+            physics: None,
+            assembly: None,
+            schema: "rtsim-robot-v8".to_string(),
             name: "Simple N20 Robot".to_string(),
             chassis: ChassisConfig {
                 mass_kg: 0.180,
@@ -7990,8 +4422,8 @@ mod gui {
                 wheel_inertia_kg_m2: 1e-7,
             },
             normal_force: NormalForceConfig {
-                model: "NoDownforce".to_string(),
-                model_kind: DownforceModel::None,
+                model: crate::io::models::NormalForceKind::None,
+
                 command_pwm_default: 0.0,
                 position_m: Vec2::new(0.0, 0.0),
                 max_force_n: 0.0,
@@ -8074,12 +4506,60 @@ mod gui {
         }
     }
 
+    #[cfg(test)]
+    mod stage9_gui_tests {
+        use super::*;
+        #[test]
+        fn simulation_and_replay_panels_render_without_advancing_physics() {
+            let mut app = RTSimApp::initial();
+            app.sim_duration_s = 0.001;
+            app.reset_simulation();
+            let ctx = egui::Context::default();
+            for _ in 0..3 {
+                let _ = ctx.run(Default::default(), |ctx| {
+                    app.poll_simulation(ctx);
+                    egui::CentralPanel::default()
+                        .show(ctx, |ui| app.show_visual_simulator(ui, ctx));
+                });
+            }
+            assert!(app
+                .sim_session
+                .as_ref()
+                .unwrap()
+                .control
+                .latest()
+                .is_none_or(|p| p.steps == 0));
+            app.sim_session = None;
+            let config = app.cfg.clone().unwrap();
+            let mut core = crate::sim::SimulationCore::new(config.clone(), Some(1000)).unwrap();
+            let file = PathBuf::from("target")
+                .join(format!("stage9-ui-{}.rtlog", crate::sim::new_run_id()));
+            let mut writer =
+                crate::replay::BinaryReplayLogger::create(&file, core.sample().sensor_adc.len())
+                    .unwrap();
+            writer.write_sample(&core.sample()).unwrap();
+            core.advance_until(1000).unwrap();
+            writer.write_sample(&core.sample()).unwrap();
+            writer.finish("duration").unwrap();
+            drop(writer);
+            app.replay = Some(crate::replay::IndexedReplay::open(&file, 128 * 1024).unwrap());
+            app.replay_config = Some(config);
+            app.replay_time_s = 0.0005;
+            let result = ctx.run(Default::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.show_replay_viewer(ui));
+            });
+            assert!(!result.shapes.is_empty());
+            assert_eq!(core.time_us(), 1000);
+        }
+    }
+
     fn default_robot_config() -> RobotConfig {
         default_loaded_config(PathBuf::from("robot_default_tmp.rtsim")).robot
     }
 
     fn default_motor() -> MotorConfig {
         MotorConfig {
+            nominal_voltage_v: 7.4,
             model: "DcMotorSimple".to_string(),
             gear_ratio: 30.0,
             efficiency: 0.75,
@@ -8108,6 +4588,9 @@ mod gui {
 
     fn default_sensor_instance() -> RobotSensorInstance {
         RobotSensorInstance {
+            height_m: 0.0,
+            acquisition: crate::config::SensorAcquisition::default(),
+            id: crate::io::assets::new_instance_id(),
             name: "Front Left".to_string(),
             asset_path: PathBuf::from("RobotAssets/Sensors/default_line_sensor.json"),
             asset: default_sensor_asset(),
@@ -8120,6 +4603,8 @@ mod gui {
 
     fn default_fan_config(nominal_voltage_v: f64) -> FanConfig {
         FanConfig {
+            nominal_rpm: 30000.,
+            id: crate::io::assets::new_instance_id(),
             position_m: Vec2::new(0.0, 0.0),
             visual_radius_m: 0.012,
             action_radius_m: 0.020,
@@ -8144,5 +4629,5 @@ pub use gui::run_app;
 
 #[cfg(not(feature = "gui"))]
 pub fn run_app() -> Result<(), String> {
-    Err("a interface gráfica v0.5 foi adicionada atrás da feature 'gui'. Compile com: cargo run --features gui -- ui".to_string())
+    Err("a interface gráfica atual foi adicionada atrás da feature 'gui'. Compile com: cargo run --features gui -- ui".to_string())
 }

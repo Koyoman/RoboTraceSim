@@ -1,0 +1,73 @@
+{
+  "track_schema": "rtsim-track-v2",
+  "name": "Etapa 8 - reta de controle",
+  "units": "mm",
+  "area": {
+    "width_mm": 2250.0,
+    "height_mm": 1700.0,
+    "grid_mm": 100.0
+  },
+  "origin": {
+    "x_mm": 500,
+    "y_mm": 500,
+    "heading_deg": 0
+  },
+  "rules": {
+    "profile": "custom",
+    "mode": "free",
+    "source": "Cenario sintetico local; nao representa regulamento oficial",
+    "edition": "2026-09-22",
+    "overrides": {}
+  },
+  "surface": {
+    "base_color": "black",
+    "line_color": "white",
+    "base_reflectance": 0.08,
+    "line_reflectance": 0.86,
+    "surface_mu": 1.2
+  },
+  "segments": [
+    {
+      "id": "ensaio",
+      "kind": "straight",
+      "length_mm": 1200
+    }
+  ],
+  "closure": {
+    "required": false,
+    "position_tolerance_mm": 0.5,
+    "heading_tolerance_deg": 0.1
+  },
+  "markings": {
+    "start_finish": {
+      "enabled": false,
+      "segment_id": "R1",
+      "start_s_mm": 100.0,
+      "distance_mm": 1000.0,
+      "margin_mm": 100.0,
+      "exit_direction": "to_increasing_s",
+      "robot_start": {
+        "delta_x_mm": 125.0,
+        "delta_y_mm": 0.0,
+        "heading_deg": 0.0
+      }
+    },
+    "corner_markers": {
+      "auto_generate": false
+    }
+  },
+  "environment": {
+    "schema": "rtsim-track-environment-v1",
+    "outside_material": "fora",
+    "outside_mu": 0,
+    "outside_reflectance": 0,
+    "race_enabled": false,
+    "laps": 1,
+    "stop_on_exit": false,
+    "start_source": "project",
+    "relief_enabled": false,
+    "regions": [],
+    "marks": [],
+    "gates": []
+  }
+}

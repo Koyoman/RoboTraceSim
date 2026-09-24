@@ -1,0 +1,11 @@
+{
+  "experiments": [
+    {
+      "project": "../physics/simplified.rtsim",
+      "seeds": [1371, 1372],
+      "physics_dt_us": [50],
+      "presets": ["ideal", "simplified"],
+      "base_pwm": [0.1, 0.2]
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+name: Core and format regression
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      heavy_benchmarks:
+        description: Run explicit performance matrix
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal --component rustfmt
+      - name: Formatting
+        run: |
+          cargo +1.96.0 fmt --all -- --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustfmt +1.96.0 --edition 2021 --check src/io/replay_v4.rs src/core/power_step.rs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Headless regression
+        run: cargo +1.96.0 test --locked --no-default-features
+      - name: GUI build and offscreen tests
+        run: cargo +1.96.0 test --locked
+      - name: Synthetic pipeline regression
+        run: |
+          cargo +1.96.0 run --locked --release --no-default-features --example stage10_fixture -- target/stage10-fixture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.96.0 run --locked --release --no-default-features -- qualify target/stage10-fixture/study.json target/stage10-qualification.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/check-qualification.py target/stage10-qualification.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Explicit heavy benchmarks
+        if: github.event_name == 'workflow_dispatch' && inputs.heavy_benchmarks
+        run: |
+          cargo +1.96.0 build --locked --release --no-default-features --bin robotrace-sim --example stage9_benchmark
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          target/release/examples/stage9_benchmark.exe target/benchmark-ci 3 100000
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

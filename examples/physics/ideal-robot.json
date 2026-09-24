@@ -1,0 +1,617 @@
+{
+  "robot_schema": "rtsim-robot-v8",
+  "name": "Etapa 6 - ideal",
+  "assembly": {
+    "mass_mode": "measured",
+    "measured_com_height_mm": 0,
+    "wheels": [
+      {
+        "id": "wheel:left:front",
+        "position_mm": [
+          42,
+          41
+        ],
+        "height_mm": 0,
+        "angle_deg": 0,
+        "radius_mm": 10,
+        "width_mm": 10,
+        "inertia_kg_m2": 5e-08,
+        "material": "default",
+        "motor": "motor:left",
+        "kind": "driven",
+        "tire": {
+          "model": "SlipRatioWheel",
+          "mu_longitudinal": 1.2,
+          "mu_lateral": 1,
+          "rolling_resistance": 0.015,
+          "slip_velocity_epsilon_m_s": 0.05
+        }
+      },
+      {
+        "id": "wheel:left:rear",
+        "position_mm": [
+          -42,
+          41
+        ],
+        "height_mm": 0,
+        "angle_deg": 0,
+        "radius_mm": 10,
+        "width_mm": 10,
+        "inertia_kg_m2": 5e-08,
+        "material": "default",
+        "motor": "motor:left",
+        "kind": "driven",
+        "tire": {
+          "model": "SlipRatioWheel",
+          "mu_longitudinal": 1.2,
+          "mu_lateral": 1,
+          "rolling_resistance": 0.015,
+          "slip_velocity_epsilon_m_s": 0.05
+        }
+      },
+      {
+        "id": "wheel:right:front",
+        "position_mm": [
+          42,
+          -41
+        ],
+        "height_mm": 0,
+        "angle_deg": 0,
+        "radius_mm": 10,
+        "width_mm": 10,
+        "inertia_kg_m2": 5e-08,
+        "material": "default",
+        "motor": "motor:right",
+        "kind": "driven",
+        "tire": {
+          "model": "SlipRatioWheel",
+          "mu_longitudinal": 1.2,
+          "mu_lateral": 1,
+          "rolling_resistance": 0.015,
+          "slip_velocity_epsilon_m_s": 0.05
+        }
+      },
+      {
+        "id": "wheel:right:rear",
+        "position_mm": [
+          -42,
+          -41
+        ],
+        "height_mm": 0,
+        "angle_deg": 0,
+        "radius_mm": 10,
+        "width_mm": 10,
+        "inertia_kg_m2": 5e-08,
+        "material": "default",
+        "motor": "motor:right",
+        "kind": "driven",
+        "tire": {
+          "model": "SlipRatioWheel",
+          "mu_longitudinal": 1.2,
+          "mu_lateral": 1,
+          "rolling_resistance": 0.015,
+          "slip_velocity_epsilon_m_s": 0.05
+        }
+      }
+    ],
+    "masses": [
+      {
+        "id": "mass:chassis",
+        "component": "chassis",
+        "mass_g": 180,
+        "position_mm": [
+          0,
+          0
+        ],
+        "height_mm": 0,
+        "inertia_kg_m2": 0.00045
+      },
+      {
+        "id": "mass:battery",
+        "component": "battery",
+        "mass_g": 0,
+        "position_mm": [
+          0,
+          0
+        ],
+        "height_mm": 0,
+        "inertia_kg_m2": 0
+      },
+      {
+        "id": "mass:motor:left",
+        "component": "motor:left",
+        "mass_g": 0,
+        "position_mm": [
+          0,
+          0
+        ],
+        "height_mm": 0,
+        "inertia_kg_m2": 0
+      },
+      {
+        "id": "mass:motor:right",
+        "component": "motor:right",
+        "mass_g": 0,
+        "position_mm": [
+          0,
+          0
+        ],
+        "height_mm": 0,
+        "inertia_kg_m2": 0
+      },
+      {
+        "id": "mass:normal_force.fans[0]",
+        "component": "normal_force.fans[0]",
+        "mass_g": 0,
+        "position_mm": [
+          0,
+          0
+        ],
+        "height_mm": 0,
+        "inertia_kg_m2": 0
+      },
+      {
+        "id": "mass:normal_force.fans[1]",
+        "component": "normal_force.fans[1]",
+        "mass_g": 0,
+        "position_mm": [
+          0,
+          0
+        ],
+        "height_mm": 0,
+        "inertia_kg_m2": 0
+      },
+      {
+        "id": "mass:normal_force.fans[2]",
+        "component": "normal_force.fans[2]",
+        "mass_g": 0,
+        "position_mm": [
+          0,
+          0
+        ],
+        "height_mm": 0,
+        "inertia_kg_m2": 0
+      },
+      {
+        "id": "mass:normal_force.fans[3]",
+        "component": "normal_force.fans[3]",
+        "mass_g": 0,
+        "position_mm": [
+          0,
+          0
+        ],
+        "height_mm": 0,
+        "inertia_kg_m2": 0
+      }
+    ]
+  },
+  "chassis": {
+    "model": "RigidBody2DChassis",
+    "mass_g": 180,
+    "inertia_kg_m2": 0.00045,
+    "center_of_mass_mm": [
+      0,
+      0
+    ],
+    "length_mm": 120,
+    "width_mm": 90
+  },
+  "normal_force": {
+    "model": "FanDownforce",
+    "default_pwm": 0.75,
+    "position_mm": [
+      0,
+      0
+    ],
+    "max_force_n": 0,
+    "max_current_a": 0,
+    "response_time_s": 0,
+    "chamber_area_m2": 0,
+    "max_delta_pressure_pa": 0,
+    "leakage_factor": 0,
+    "speed_sensitivity": 0,
+    "force_curve": [],
+    "fans": [
+      {
+        "id": "normal_force.fans[0]",
+        "position_mm": [
+          38,
+          28
+        ],
+        "visual_radius_mm": 12,
+        "action_radius_mm": 22,
+        "max_force_n": 0.55,
+        "max_current_a": 0.75,
+        "nominal_voltage_v": 7.4,
+        "nominal_current_a": 0.75,
+        "power_w": 5.550000000000001,
+        "min_pwm": 0,
+        "max_pwm": 1,
+        "response_time_s": 0.03,
+        "pwm_scale": 1,
+        "pwm": 1,
+        "curve_model": "LookupTable",
+        "force_curve": [
+          [
+            0,
+            0
+          ],
+          [
+            0.35,
+            0.07
+          ],
+          [
+            0.6,
+            0.22
+          ],
+          [
+            0.8,
+            0.38
+          ],
+          [
+            1,
+            0.55
+          ]
+        ]
+      },
+      {
+        "id": "normal_force.fans[1]",
+        "position_mm": [
+          38,
+          -28
+        ],
+        "visual_radius_mm": 12,
+        "action_radius_mm": 22,
+        "max_force_n": 0.55,
+        "max_current_a": 0.75,
+        "nominal_voltage_v": 7.4,
+        "nominal_current_a": 0.75,
+        "power_w": 5.550000000000001,
+        "min_pwm": 0,
+        "max_pwm": 1,
+        "response_time_s": 0.03,
+        "pwm_scale": 1,
+        "pwm": 1,
+        "curve_model": "LookupTable",
+        "force_curve": [
+          [
+            0,
+            0
+          ],
+          [
+            0.35,
+            0.07
+          ],
+          [
+            0.6,
+            0.22
+          ],
+          [
+            0.8,
+            0.38
+          ],
+          [
+            1,
+            0.55
+          ]
+        ]
+      },
+      {
+        "id": "normal_force.fans[2]",
+        "position_mm": [
+          -38,
+          28
+        ],
+        "visual_radius_mm": 12,
+        "action_radius_mm": 22,
+        "max_force_n": 0.5,
+        "max_current_a": 0.7,
+        "nominal_voltage_v": 7.4,
+        "nominal_current_a": 0.7,
+        "power_w": 5.18,
+        "min_pwm": 0,
+        "max_pwm": 1,
+        "response_time_s": 0.035,
+        "pwm_scale": 1,
+        "pwm": 1,
+        "curve_model": "LookupTable",
+        "force_curve": [
+          [
+            0,
+            0
+          ],
+          [
+            0.35,
+            0.06
+          ],
+          [
+            0.6,
+            0.2
+          ],
+          [
+            0.8,
+            0.35
+          ],
+          [
+            1,
+            0.5
+          ]
+        ]
+      },
+      {
+        "id": "normal_force.fans[3]",
+        "position_mm": [
+          -38,
+          -28
+        ],
+        "visual_radius_mm": 12,
+        "action_radius_mm": 22,
+        "max_force_n": 0.5,
+        "max_current_a": 0.7,
+        "nominal_voltage_v": 7.4,
+        "nominal_current_a": 0.7,
+        "power_w": 5.18,
+        "min_pwm": 0,
+        "max_pwm": 1,
+        "response_time_s": 0.035,
+        "pwm_scale": 1,
+        "pwm": 1,
+        "curve_model": "LookupTable",
+        "force_curve": [
+          [
+            0,
+            0
+          ],
+          [
+            0.35,
+            0.06
+          ],
+          [
+            0.6,
+            0.2
+          ],
+          [
+            0.8,
+            0.35
+          ],
+          [
+            1,
+            0.5
+          ]
+        ]
+      }
+    ]
+  },
+  "drivetrain": {
+    "type": "DifferentialDrive4Wheel",
+    "wheel_radius_mm": 10,
+    "wheel_width_mm": 10,
+    "track_width_mm": 82,
+    "wheelbase_mm": 84,
+    "wheel_inertia_g_cm2": 1
+  },
+  "tire": {
+    "model": "SlipRatioWheel",
+    "mu_longitudinal": 1.2,
+    "mu_lateral": 1,
+    "rolling_resistance": 0.015,
+    "slip_velocity_epsilon_m_s": 0.05
+  },
+  "motors": {
+    "left": {
+      "model": "DcMotorSimple",
+      "nominal_voltage_v": 7.4,
+      "gear_ratio": 30,
+      "efficiency": 0.75,
+      "no_load_rpm": 1800,
+      "stall_torque_mnm": 5,
+      "stall_current_a": 1.6
+    },
+    "right": {
+      "model": "DcMotorSimple",
+      "nominal_voltage_v": 7.4,
+      "gear_ratio": 30,
+      "efficiency": 0.75,
+      "no_load_rpm": 1800,
+      "stall_torque_mnm": 5,
+      "stall_current_a": 1.6
+    }
+  },
+  "driver": {
+    "model": "PwmHBridge",
+    "pwm_frequency_hz": 20000,
+    "mode": "brake",
+    "voltage_drop_v": 0.2,
+    "pwm_resolution_bits": 10,
+    "command_deadband": 0.001,
+    "current_limit_a": 3
+  },
+  "battery": {
+    "model": "VoltageSagBattery",
+    "nominal_voltage_v": 7.4,
+    "full_voltage_v": 7.4,
+    "empty_voltage_v": 6.4,
+    "cells": 2,
+    "capacity_mah": 300,
+    "internal_resistance_ohm": 0.08,
+    "initial_soc": 1,
+    "current_limit_a": 60
+  },
+  "sensors": [
+    {
+      "acquisition": {
+        "adc_bits": 12,
+        "reflectance_noise_std": 0.01,
+        "adc_noise_lsb": 1,
+        "seed": 1371
+      },
+      "id": "sensor-1",
+      "name": "Front Left",
+      "asset_path": "../../RobotAssets/Sensors/default_line_sensor.json",
+      "asset": {
+        "name": "Default Line Sensor",
+        "model": "GenericAnalogLineSensor",
+        "sensor_type": "LineAnalog",
+        "visual_width_mm": 8,
+        "visual_height_mm": 8,
+        "visual_radius_mm": 4,
+        "detection_area": {
+          "kind": "Rectangle",
+          "width_mm": 5,
+          "height_mm": 2
+        },
+        "response_model": "Ideal",
+        "notes": "Default reusable line sensor asset. Position stays only in robot.json."
+      },
+      "position_mm": [
+        95,
+        25
+      ],
+      "height_mm": 0,
+      "angle_deg": 0,
+      "enabled": true,
+      "visible_in_preview": true
+    },
+    {
+      "acquisition": {
+        "adc_bits": 12,
+        "reflectance_noise_std": 0.01,
+        "adc_noise_lsb": 1,
+        "seed": 1372
+      },
+      "id": "sensor-2",
+      "name": "Front Right",
+      "asset_path": "../../RobotAssets/Sensors/default_line_sensor.json",
+      "asset": {
+        "name": "Default Line Sensor",
+        "model": "GenericAnalogLineSensor",
+        "sensor_type": "LineAnalog",
+        "visual_width_mm": 8,
+        "visual_height_mm": 8,
+        "visual_radius_mm": 4,
+        "detection_area": {
+          "kind": "Rectangle",
+          "width_mm": 5,
+          "height_mm": 2
+        },
+        "response_model": "Ideal",
+        "notes": "Default reusable line sensor asset. Position stays only in robot.json."
+      },
+      "position_mm": [
+        95,
+        -25
+      ],
+      "height_mm": 0,
+      "angle_deg": 0,
+      "enabled": true,
+      "visible_in_preview": true
+    },
+    {
+      "acquisition": {
+        "adc_bits": 12,
+        "reflectance_noise_std": 0.01,
+        "adc_noise_lsb": 1,
+        "seed": 1373
+      },
+      "id": "sensor-3",
+      "name": "Left Side",
+      "asset_path": "../../RobotAssets/Sensors/default_line_sensor.json",
+      "asset": {
+        "name": "Default Line Sensor",
+        "model": "GenericAnalogLineSensor",
+        "sensor_type": "LineAnalog",
+        "visual_width_mm": 8,
+        "visual_height_mm": 8,
+        "visual_radius_mm": 4,
+        "detection_area": {
+          "kind": "Rectangle",
+          "width_mm": 5,
+          "height_mm": 2
+        },
+        "response_model": "Ideal",
+        "notes": "Default reusable line sensor asset. Position stays only in robot.json."
+      },
+      "position_mm": [
+        20,
+        120
+      ],
+      "height_mm": 0,
+      "angle_deg": 90,
+      "enabled": true,
+      "visible_in_preview": true
+    },
+    {
+      "acquisition": {
+        "adc_bits": 12,
+        "reflectance_noise_std": 0.01,
+        "adc_noise_lsb": 1,
+        "seed": 1374
+      },
+      "id": "sensor-4",
+      "name": "Right Side",
+      "asset_path": "../../RobotAssets/Sensors/default_line_sensor.json",
+      "asset": {
+        "name": "Default Line Sensor",
+        "model": "GenericAnalogLineSensor",
+        "sensor_type": "LineAnalog",
+        "visual_width_mm": 8,
+        "visual_height_mm": 8,
+        "visual_radius_mm": 4,
+        "detection_area": {
+          "kind": "Rectangle",
+          "width_mm": 5,
+          "height_mm": 2
+        },
+        "response_model": "Ideal",
+        "notes": "Default reusable line sensor asset. Position stays only in robot.json."
+      },
+      "position_mm": [
+        20,
+        -120
+      ],
+      "height_mm": 0,
+      "angle_deg": -90,
+      "enabled": true,
+      "visible_in_preview": true
+    }
+  ],
+  "line_validity_areas": [
+    {
+      "name": "Main body",
+      "position_mm": [
+        0,
+        0
+      ],
+      "length_mm": 120,
+      "width_mm": 90,
+      "angle_deg": 0,
+      "enabled": true
+    }
+  ],
+  "encoder": {
+    "model": "QuantizedEncoder",
+    "ticks_per_rev": 360,
+    "invert_left": false,
+    "invert_right": false
+  },
+  "gyro": {
+    "model": "NoisyGyro",
+    "noise_std_rad_s": 0.01,
+    "bias_rad_s": 0,
+    "saturation_rad_s": 34.9,
+    "seed": 2467
+  },
+  "controller": {
+    "model": "BuiltInPid",
+    "kp": 13,
+    "ki": 0,
+    "kd": 0.035,
+    "base_pwm": 0.34,
+    "max_pwm": 0.9,
+    "target_position_mm": 0,
+    "downforce_pwm": 0.75
+  },
+  "physics": {
+    "preset": "ideal"
+  }
+}

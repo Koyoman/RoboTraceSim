@@ -1,8 +1,8 @@
 {
   "rtsim_schema": "rtsim-project-v1",
-  "name": "basic-v0.08-track-geometry-demo",
+  "name": "basic-0.6.0-track-geometry-demo",
   "robot": "robot.json",
-  "track": "C:/RoboTraceSim/Tracks/Track Geometry Foundation Demo.json",
+  "track": "../../Tracks/Track Geometry Foundation Demo.json",
   "time": {
     "physics_dt_us": 500,
     "controller_period_us": 1000,

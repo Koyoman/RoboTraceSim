@@ -20,8 +20,39 @@ pub fn run_cli(args: Vec<String>) -> Result<(), String> {
         "import-log" => import_log_command(&args[2..]),
         "compare" => compare_command(&args[2..]),
         "tune" | "calibrate" => tune_command(&args[2..]),
-        "batch" => {
-            Err("batch is planned after v0.08; use repeated 'run' commands for now".to_string())
+        "batch" => batch_command(&args[2..]),
+        "qualify" => {
+            if args.len() != 4 {
+                return Err("usage: qualify study.json report.json".into());
+            }
+            let r =
+                crate::experiments::calibration::qualify(Path::new(&args[2]), Path::new(&args[3]))?;
+            println!(
+                "{}",
+                r.get("status")
+                    .and_then(crate::json::JsonValue::as_str)
+                    .unwrap_or("unknown")
+            );
+            Ok(())
+        }
+        "robustness" => {
+            if args.len() < 4 || args.len() > 5 {
+                return Err(
+                    "usage: robustness project.rtsim report.json [duration, default 100ms]".into(),
+                );
+            }
+            let duration = if let Some(s) = args.get(4) {
+                parse_duration_us(s)?
+            } else {
+                100000
+            };
+            crate::experiments::robustness::run(
+                Path::new(&args[2]),
+                Path::new(&args[3]),
+                duration,
+            )?;
+            println!("Numerical report: {}", args[3]);
+            Ok(())
         }
         "help" | "--help" | "-h" => {
             print_help();
@@ -37,11 +68,28 @@ fn run_command(args: &[String]) -> Result<(), String> {
     let mut output_csv: Option<PathBuf> = None;
     let mut output_replay: Option<PathBuf> = None;
     let mut duration_us: Option<u64> = None;
+    let mut physics_dt_override_us = None;
 
     let mut i = 0usize;
     while i < args.len() {
         match args[i].as_str() {
             "--headless" => headless = true,
+            "--physics-dt-us" => {
+                i += 1;
+                physics_dt_override_us = Some(
+                    args.get(i)
+                        .ok_or("--physics-dt-us needs a value")?
+                        .parse::<u64>()
+                        .map_err(|_| "invalid --physics-dt-us")?,
+                );
+            }
+            flag if flag.starts_with("--physics-dt-us=") => {
+                physics_dt_override_us = Some(
+                    flag.trim_start_matches("--physics-dt-us=")
+                        .parse::<u64>()
+                        .map_err(|_| "invalid --physics-dt-us")?,
+                );
+            }
             "--duration" => {
                 i += 1;
                 let value = args
@@ -111,7 +159,7 @@ fn run_command(args: &[String]) -> Result<(), String> {
             output_replay,
             headless,
             benchmark: false,
-            physics_dt_override_us: None,
+            physics_dt_override_us,
         },
     )?;
     print_run_summary(&summary);
@@ -234,7 +282,7 @@ fn export_command(args: &[String]) -> Result<(), String> {
     }
 
     if !format.eq_ignore_ascii_case("csv") {
-        return Err("v0.08 export supports only --format csv".to_string());
+        return Err("atual export supports only --format csv".to_string());
     }
     let input = input.ok_or_else(|| "missing replay input. Example: robotrace-sim export resultado.rtlog --format csv --output resultado.csv".to_string())?;
     let output = output.unwrap_or_else(|| default_export_path(&input));
@@ -265,7 +313,7 @@ pub fn parse_duration_us(text: &str) -> Result<u64, String> {
     if !value.is_finite() || value < 0.0 {
         return Err("duration must be a finite non-negative value".to_string());
     }
-    Ok((value * multiplier).round() as u64)
+    crate::core::clock::duration_to_us(value, multiplier)
 }
 
 fn assign_output_path(
@@ -417,7 +465,11 @@ fn compare_command(args: &[String]) -> Result<(), String> {
     let real = import_real_log(&real_path)?;
     let report = compare_project_with_real(cfg, &real, duration_us)?;
 
-    println!("Robotrace Sim v0.08 comparison");
+    println!(concat!(
+        "Robotrace Sim ",
+        env!("CARGO_PKG_VERSION"),
+        " comparison"
+    ));
     println!("real log: {}", real.source);
     print_metrics(&report.metrics);
 
@@ -499,7 +551,11 @@ fn tune_command(args: &[String]) -> Result<(), String> {
     write_tuning_report(&report, &output)
         .map_err(|e| format!("failed to write {}: {e}", output.display()))?;
 
-    println!("Robotrace Sim v0.08 parameter tuning");
+    println!(concat!(
+        "Robotrace Sim ",
+        env!("CARGO_PKG_VERSION"),
+        " parameter tuning"
+    ));
     println!("evaluated candidates: {}", report.evaluated_candidates);
     println!("baseline score: {:.9}", report.baseline.score);
     println!("best score:     {:.9}", report.best.metrics.score);
@@ -522,8 +578,17 @@ fn default_export_path(input: &Path) -> PathBuf {
 }
 
 fn print_run_summary(summary: &RunSummary) {
-    println!("Robotrace Sim v0.08 headless run complete");
+    println!(concat!(
+        "Robotrace Sim ",
+        env!("CARGO_PKG_VERSION"),
+        " headless run complete"
+    ));
     println!("project: {}", summary.project_name);
+    println!(
+        "termination: {} ({} race events)",
+        summary.termination_reason,
+        summary.race_events.len()
+    );
     println!("robot:   {}", summary.robot_name);
     println!("track:   {}", summary.track_name);
     println!(
@@ -534,6 +599,11 @@ fn print_run_summary(summary: &RunSummary) {
         "final:   x={:.4} m y={:.4} m yaw={:.4} rad",
         summary.final_pose.x, summary.final_pose.y, summary.final_pose.yaw
     );
+    println!(
+        "samples: {} (initial, scheduled and terminal)",
+        summary.samples
+    );
+    print_effective_time(summary);
     if let Some(path) = summary.csv_path.as_ref() {
         println!("csv:     {}", path.display());
     }
@@ -542,34 +612,61 @@ fn print_run_summary(summary: &RunSummary) {
     }
 }
 
+fn print_effective_time(summary: &RunSummary) {
+    let cfg = &summary.effective_config;
+    println!(
+        "physics/control:  {} / {} us",
+        cfg.time.physics_dt_us, cfg.time.controller_period_us
+    );
+    println!(
+        "seeds line/gyro:  {} / {}",
+        cfg.line_sensor_seed, cfg.gyro_seed
+    );
+    for path in &summary.metadata_paths {
+        println!("metadata: {}", path.display());
+    }
+}
+
 fn print_benchmark_summary(summary: &RunSummary) {
-    println!("Robotrace Sim v0.08 benchmark");
+    println!(concat!(
+        "Robotrace Sim ",
+        env!("CARGO_PKG_VERSION"),
+        " benchmark"
+    ));
+    for warning in &summary.warnings {
+        eprintln!("warning: {warning}");
+    }
     println!("project:          {}", summary.project_name);
     println!("simulated time:   {:.6} s", summary.simulated_time_s);
     println!("steps:            {}", summary.steps);
+    println!("samples:          {}", summary.samples);
+    print_effective_time(summary);
     println!("wall time:        {:.6} s", summary.wall_time.as_secs_f64());
     println!("steps/s:          {:.0}", summary.steps_per_second);
     println!("real-time factor: {:.2}x", summary.realtime_factor);
 }
 
 fn print_help() {
-    println!("Robotrace Sim v0.08");
+    println!(concat!("Robotrace Sim ", env!("CARGO_PKG_VERSION"), ""));
     println!();
     println!("USAGE:");
-    println!("  robotrace-sim                         # abre a interface única v0.08");
-    println!("  robotrace-sim ui                      # abre a interface única v0.08");
-    println!("  robotrace-sim run <projeto.rtsim> [--headless] [--duration 10s] [--csv out.csv] [--replay out.rtlog]");
+    println!("  robotrace-sim qualify study.json report.json");
+    println!("  robotrace-sim robustness project.rtsim report.json [100ms]");
+    println!("  robotrace-sim                         # abre a interface única atual");
+    println!("  robotrace-sim ui                      # abre a interface única atual");
+    println!("  robotrace-sim run <projeto.rtsim> [--headless] [--duration 10s] [--physics-dt-us 50] [--csv out.csv] [--replay out.rtlog]");
+    println!("  robotrace-sim batch manifest.json --out NEW_DIRECTORY [--jobs 2] [--cancel-file cancel.flag]");
     println!("  robotrace-sim benchmark <projeto.rtsim> [--duration 10s] [--physics-dt-us 500]");
     println!("  robotrace-sim export <resultado.rtlog> --format csv [--output resultado.csv]");
     println!("  robotrace-sim import-log <real.csv> [--output real_normalized.csv]");
     println!("  robotrace-sim compare <projeto.rtsim> --real real.csv [--output comparacao.csv] [--report comparacao.txt]");
     println!("  robotrace-sim tune <projeto.rtsim> --real real.csv [--output ajuste.json]");
     println!();
-    println!("v0.08 adds real-log import, simulation-vs-real comparison, trajectory/sensor/speed error metrics and coarse parameter tuning.");
+    println!("atual adds real-log import, simulation-vs-real comparison, trajectory/sensor/speed error metrics and coarse parameter tuning.");
 }
 
 fn print_run_help() {
-    println!("USAGE: robotrace-sim run <projeto.rtsim> --headless --duration 10s --csv resultado.csv --replay resultado.rtlog");
+    println!("USAGE: robotrace-sim run <projeto.rtsim> --headless --duration 10s --physics-dt-us 50 --csv resultado.csv --replay resultado.rtlog");
 }
 
 fn print_benchmark_help() {
@@ -591,7 +688,7 @@ fn print_compare_help() {
 
 fn print_tune_help() {
     println!("USAGE: robotrace-sim tune <projeto.rtsim> --real real.csv --output ajuste.json");
-    println!("The v0.08 tuner evaluates a deterministic coarse grid over tire friction and motor stall torque.");
+    println!("The atual tuner evaluates a deterministic coarse grid over tire friction and motor stall torque.");
 }
 
 #[cfg(test)]
@@ -613,4 +710,48 @@ mod tests {
         assert!(csv.is_none());
         assert_eq!(replay.unwrap(), PathBuf::from("run.rtlog"));
     }
+}
+
+fn batch_command(args: &[String]) -> Result<(), String> {
+    if args.iter().any(|s| s == "--help" || s == "-h") {
+        println!(
+            "USAGE: batch manifest.json --out NEW_DIRECTORY [--jobs 1..32] [--cancel-file path]"
+        );
+        return Ok(());
+    }
+    let manifest = args
+        .first()
+        .ok_or("usage: batch manifest.json --out new-directory [--jobs 1] [--cancel-file path]")?;
+    let mut output = None;
+    let mut jobs = 1;
+    let mut cancel = None;
+    let mut i = 1;
+    while i < args.len() {
+        let value = args.get(i + 1).ok_or("missing batch argument value")?;
+        match args[i].as_str() {
+            "--out" => output = Some(PathBuf::from(value)),
+            "--jobs" => jobs = value.parse::<usize>().map_err(|_| "invalid jobs")?,
+            "--cancel-file" => cancel = Some(PathBuf::from(value)),
+            _ => return Err("unknown batch option".into()),
+        }
+        i += 2;
+    }
+    let configs = crate::experiments::batch::expand_manifest(Path::new(manifest))?;
+    let output = output.ok_or("batch requires --out")?;
+    let result = crate::experiments::batch::run_batch(
+        configs,
+        &output,
+        jobs,
+        std::sync::Arc::new(crate::experiments::jobs::RunControl::new(1, false)),
+        cancel,
+    )?;
+    println!(
+        "Batch: {} experiments; summary {}",
+        result.len(),
+        output.join("summary.json").display()
+    );
+    if result.iter().any(|r| r.error.is_some()) {
+        return Err("one or more batch experiments failed; inspect summary.json".into());
+    }
+    Ok(())
 }

@@ -1,0 +1,15 @@
+{"case":"simplified8","mode":"session","logs":false,"repeat":0,"total_s":0.0131162,"error":"physics failure at t=9600 us: per-wheel solver did not converge; reduce physics step or contact stiffness"}
+{"case":"simplified8","mode":"session","logs":false,"repeat":1,"total_s":0.0125889,"error":"physics failure at t=9600 us: per-wheel solver did not converge; reduce physics step or contact stiffness"}
+{"case":"simplified8","mode":"session","logs":false,"repeat":2,"total_s":0.0130055,"error":"physics failure at t=9600 us: per-wheel solver did not converge; reduce physics step or contact stiffness"}
+{"case":"simplified8","mode":"runner","logs":false,"repeat":0,"total_s":0.0125223,"error":"physics failure at t=9600 us: per-wheel solver did not converge; reduce physics step or contact stiffness"}
+{"case":"simplified8","mode":"runner","logs":false,"repeat":1,"total_s":0.0123511,"error":"physics failure at t=9600 us: per-wheel solver did not converge; reduce physics step or contact stiffness"}
+{"case":"simplified8","mode":"runner","logs":false,"repeat":2,"total_s":0.0126172,"error":"physics failure at t=9600 us: per-wheel solver did not converge; reduce physics step or contact stiffness"}
+{"case":"simplified8","mode":"worker","logs":false,"repeat":0,"total_s":0.013288,"error":"physics failure at t=9600 us: per-wheel solver did not converge; reduce physics step or contact stiffness"}
+{"case":"simplified8","mode":"worker","logs":false,"repeat":1,"total_s":0.0138418,"error":"physics failure at t=9600 us: per-wheel solver did not converge; reduce physics step or contact stiffness"}
+{"case":"simplified8","mode":"worker","logs":false,"repeat":2,"total_s":0.0148665,"error":"physics failure at t=9600 us: per-wheel solver did not converge; reduce physics step or contact stiffness"}
+{"case":"simplified8","mode":"runner","logs":true,"repeat":0,"total_s":0.0220704,"error":"physics failure at t=9600 us: per-wheel solver did not converge; reduce physics step or contact stiffness"}
+{"case":"simplified8","mode":"runner","logs":true,"repeat":1,"total_s":0.0364373,"error":"physics failure at t=9600 us: per-wheel solver did not converge; reduce physics step or contact stiffness"}
+{"case":"simplified8","mode":"runner","logs":true,"repeat":2,"total_s":0.0335293,"error":"physics failure at t=9600 us: per-wheel solver did not converge; reduce physics step or contact stiffness"}
+{"case":"simplified8","mode":"worker","logs":true,"repeat":0,"total_s":0.0273222,"error":"physics failure at t=9600 us: per-wheel solver did not converge; reduce physics step or contact stiffness"}
+{"case":"simplified8","mode":"worker","logs":true,"repeat":1,"total_s":0.0257867,"error":"physics failure at t=9600 us: per-wheel solver did not converge; reduce physics step or contact stiffness"}
+{"case":"simplified8","mode":"worker","logs":true,"repeat":2,"total_s":0.0408766,"error":"physics failure at t=9600 us: per-wheel solver did not converge; reduce physics step or contact stiffness"}

@@ -94,14 +94,12 @@ pub fn clamp01(v: f64) -> f64 {
     clamp(v, 0.0, 1.0)
 }
 
-pub fn wrap_angle(mut a: f64) -> f64 {
-    while a > PI {
-        a -= 2.0 * PI;
+pub fn wrap_angle(a: f64) -> f64 {
+    if (-PI..=PI).contains(&a) {
+        a
+    } else {
+        (a + PI).rem_euclid(2.0 * PI) - PI
     }
-    while a < -PI {
-        a += 2.0 * PI;
-    }
-    a
 }
 
 pub fn distance_point_segment(p: Vec2, a: Vec2, b: Vec2) -> f64 {

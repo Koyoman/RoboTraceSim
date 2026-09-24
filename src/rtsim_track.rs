@@ -40,6 +40,8 @@ pub struct TrackPose {
 
 #[derive(Debug, Clone)]
 pub struct TrackRulesConfig {
+    pub source: String,
+    pub edition: String,
     pub profile: String,
     pub mode: TrackRulesMode,
     pub overrides: TrackRuleOverrides,
@@ -259,6 +261,8 @@ impl TrackV2 {
                 heading_deg: 0.0,
             },
             rules: TrackRulesConfig {
+                source: String::new(),
+                edition: String::new(),
                 profile: "robotrace official".to_string(),
                 mode: TrackRulesMode::Warning,
                 overrides: TrackRuleOverrides::default(),

@@ -12,6 +12,37 @@ pub enum JsonValue {
 }
 
 impl JsonValue {
+    pub fn to_json(&self) -> Result<String, String> {
+        Ok(match self {
+            Self::Null => "null".into(),
+            Self::Bool(b) => b.to_string(),
+            Self::Number(n) => {
+                if !n.is_finite() {
+                    return Err("non-finite JSON number".into());
+                }
+                n.to_string()
+            }
+            Self::String(s) => format!("\"{}\"", crate::io::persistence::escape_json(s)),
+            Self::Array(a) => format!(
+                "[{}]",
+                a.iter()
+                    .map(Self::to_json)
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join(",")
+            ),
+            Self::Object(o) => format!(
+                "{{{}}}",
+                o.iter()
+                    .map(|(k, v)| Ok(format!(
+                        "\"{}\":{}",
+                        crate::io::persistence::escape_json(k),
+                        v.to_json()?
+                    )))
+                    .collect::<Result<Vec<_>, String>>()?
+                    .join(",")
+            ),
+        })
+    }
     pub fn get(&self, key: &str) -> Option<&JsonValue> {
         match self {
             JsonValue::Object(obj) => obj.get(key),
@@ -169,8 +200,20 @@ impl<'a> Parser<'a> {
                         b'r' => out.push('\r'),
                         b't' => out.push('\t'),
                         b'u' => {
-                            let code = self.parse_hex4()?;
-                            let ch = char::from_u32(code as u32).ok_or_else(|| {
+                            let first = self.parse_hex4()?;
+                            let code = if (0xD800..=0xDBFF).contains(&first) {
+                                if self.bump() != Some(b'\\') || self.bump() != Some(b'u') {
+                                    return Err(JsonError::new(self.pos, "missing low surrogate"));
+                                }
+                                let low = self.parse_hex4()?;
+                                if !(0xDC00..=0xDFFF).contains(&low) {
+                                    return Err(JsonError::new(self.pos, "invalid low surrogate"));
+                                }
+                                0x10000 + ((first as u32 - 0xD800) << 10) + (low as u32 - 0xDC00)
+                            } else {
+                                first as u32
+                            };
+                            let ch = char::from_u32(code).ok_or_else(|| {
                                 JsonError::new(self.pos, "invalid unicode scalar value")
                             })?;
                             out.push(ch);
@@ -179,7 +222,14 @@ impl<'a> Parser<'a> {
                     }
                 }
                 0x00..=0x1F => return Err(JsonError::new(self.pos, "control character in string")),
-                _ => out.push(b as char),
+                _ => {
+                    let start = self.pos - 1;
+                    let text = std::str::from_utf8(&self.bytes[start..])
+                        .map_err(|_| JsonError::new(start, "invalid UTF-8"))?;
+                    let ch = text.chars().next().unwrap();
+                    self.pos = start + ch.len_utf8();
+                    out.push(ch);
+                }
             }
         }
         Err(JsonError::new(self.pos, "unterminated string"))
@@ -216,6 +266,10 @@ impl<'a> Parser<'a> {
             match self.peek() {
                 Some(b',') => {
                     self.bump();
+                    self.skip_ws();
+                    if matches!(self.peek(), Some(b']' | b'}')) {
+                        return Err(JsonError::new(self.pos, "trailing comma"));
+                    }
                 }
                 Some(b']') => {
                     self.bump();
@@ -245,11 +299,17 @@ impl<'a> Parser<'a> {
                 return Err(JsonError::new(self.pos, "expected ':' after object key"));
             }
             let value = self.parse_value()?;
-            values.insert(key, value);
+            if values.insert(key, value).is_some() {
+                return Err(JsonError::new(self.pos, "duplicate object key"));
+            }
             self.skip_ws();
             match self.peek() {
                 Some(b',') => {
                     self.bump();
+                    self.skip_ws();
+                    if matches!(self.peek(), Some(b']' | b'}')) {
+                        return Err(JsonError::new(self.pos, "trailing comma"));
+                    }
                 }
                 Some(b'}') => {
                     self.bump();
@@ -308,6 +368,9 @@ impl<'a> Parser<'a> {
         let number = s
             .parse::<f64>()
             .map_err(|_| JsonError::new(start, "invalid f64 number"))?;
+        if !number.is_finite() {
+            return Err(JsonError::new(start, "non-finite number"));
+        }
         Ok(JsonValue::Number(number))
     }
 }

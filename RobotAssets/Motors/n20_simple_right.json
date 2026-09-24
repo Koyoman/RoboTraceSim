@@ -6,6 +6,7 @@
     "gear_ratio": 30.0,
     "efficiency": 0.75,
     "no_load_rpm": 1800.0,
+    "nominal_voltage_v": 7.4,
     "stall_torque_mnm": 5.0,
     "stall_current_a": 1.6
   }

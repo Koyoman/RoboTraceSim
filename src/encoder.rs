@@ -1,92 +1,124 @@
 use crate::config::EncoderConfig;
-use std::f64::consts::PI;
-
+use crate::models::sensing::EncoderSettings;
+use crate::rng::DeterministicRng;
+use std::collections::VecDeque;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EncoderSideOutput {
     pub ticks: i64,
     pub delta_ticks: i64,
     pub velocity_rad_s: f64,
 }
-
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EncoderOutput {
     pub t_us: u64,
+    pub available_us: u64,
+    pub age_us: u64,
+    pub valid: bool,
     pub left: EncoderSideOutput,
     pub right: EncoderSideOutput,
 }
-
 #[derive(Debug, Clone)]
 pub struct QuantizedEncoder {
     cfg: EncoderConfig,
-    last_left_ticks: i64,
-    last_right_ticks: i64,
-    last_t_us: Option<u64>,
+    settings: EncoderSettings,
+    previous: [i64; 2],
+    observed: [i64; 2],
+    filtered: [f64; 2],
+    last: Option<u64>,
+    rng: [DeterministicRng; 2],
+    pending: VecDeque<EncoderOutput>,
+    delivered: EncoderOutput,
 }
-
 impl QuantizedEncoder {
     pub fn new(cfg: EncoderConfig) -> Self {
+        Self::with_settings(cfg, EncoderSettings::default())
+    }
+    pub fn with_settings(cfg: EncoderConfig, settings: EncoderSettings) -> Self {
         Self {
             cfg,
-            last_left_ticks: 0,
-            last_right_ticks: 0,
-            last_t_us: None,
+            rng: [
+                DeterministicRng::new(settings.seed),
+                DeterministicRng::new(settings.seed ^ 0xa0761d6478bd642f),
+            ],
+            settings,
+            previous: [0; 2],
+            observed: [0; 2],
+            filtered: [0.; 2],
+            last: None,
+            pending: VecDeque::new(),
+            delivered: Default::default(),
         }
     }
-
-    pub fn sample(
-        &mut self,
-        left_angle_rad: f64,
-        right_angle_rad: f64,
-        t_us: u64,
-    ) -> EncoderOutput {
-        let left_ticks =
-            angle_to_ticks(left_angle_rad, self.cfg.ticks_per_rev, self.cfg.invert_left);
-        let right_ticks = angle_to_ticks(
-            right_angle_rad,
-            self.cfg.ticks_per_rev,
-            self.cfg.invert_right,
-        );
-        let dt_s = self
-            .last_t_us
-            .map(|last| (t_us.saturating_sub(last) as f64 / 1_000_000.0).max(1e-12));
-        let left_delta = left_ticks - self.last_left_ticks;
-        let right_delta = right_ticks - self.last_right_ticks;
-        let left_velocity = dt_s
-            .map(|dt| ticks_to_angle(left_delta, self.cfg.ticks_per_rev) / dt)
-            .unwrap_or(0.0);
-        let right_velocity = dt_s
-            .map(|dt| ticks_to_angle(right_delta, self.cfg.ticks_per_rev) / dt)
-            .unwrap_or(0.0);
-
-        self.last_left_ticks = left_ticks;
-        self.last_right_ticks = right_ticks;
-        self.last_t_us = Some(t_us);
-
-        EncoderOutput {
+    pub fn effective_ticks_per_wheel_rev(&self) -> f64 {
+        self.cfg.ticks_per_rev as f64 * self.settings.quadrature as f64 * self.settings.shaft_ratio
+    }
+    pub fn sample(&mut self, left: f64, right: f64, t_us: u64) -> EncoderOutput {
+        let scale = self.effective_ticks_per_wheel_rev();
+        let dt = self.last.map(|t| (t_us - t) as f64 * 1e-6);
+        let angles = [left, right];
+        let invert = [self.cfg.invert_left, self.cfg.invert_right];
+        let mut sides = [EncoderSideOutput::default(); 2];
+        for side in 0..2 {
+            let ticks = (angles[side] / std::f64::consts::TAU
+                * scale
+                * if invert[side] { -1. } else { 1. })
+            .round() as i64;
+            let delta = ticks - self.previous[side];
+            self.previous[side] = ticks;
+            // Loss is sampled independently per side and acquisition. Large batches use a bounded binomial approximation.
+            let count = delta.unsigned_abs();
+            let lost = if self.settings.loss_probability == 0. {
+                0
+            } else if self.settings.loss_probability == 1. {
+                count
+            } else if count <= 4096 {
+                (0..count)
+                    .filter(|_| self.rng[side].next_f64() < self.settings.loss_probability)
+                    .count() as u64
+            } else {
+                let p = self.settings.loss_probability;
+                (count as f64 * p + self.rng[side].gaussian((count as f64 * p * (1. - p)).sqrt()))
+                    .round()
+                    .clamp(0., count as f64) as u64
+            };
+            let observed = delta.signum() * (count - lost) as i64;
+            self.observed[side] += observed;
+            let v = dt
+                .filter(|dt| *dt > 0.)
+                .map(|dt| observed as f64 * std::f64::consts::TAU / scale / dt)
+                .unwrap_or(0.);
+            let alpha = if self.settings.filter_tau_s > 0. {
+                dt.map(|dt| 1. - (-dt / self.settings.filter_tau_s).exp())
+                    .unwrap_or(1.)
+            } else {
+                1.
+            };
+            self.filtered[side] += alpha * (v - self.filtered[side]);
+            sides[side] = EncoderSideOutput {
+                ticks: self.observed[side],
+                delta_ticks: observed,
+                velocity_rad_s: self.filtered[side],
+            };
+        }
+        self.last = Some(t_us);
+        self.pending.push_back(EncoderOutput {
             t_us,
-            left: EncoderSideOutput {
-                ticks: left_ticks,
-                delta_ticks: left_delta,
-                velocity_rad_s: left_velocity,
-            },
-            right: EncoderSideOutput {
-                ticks: right_ticks,
-                delta_ticks: right_delta,
-                velocity_rad_s: right_velocity,
-            },
+            available_us: t_us.saturating_add(self.settings.latency_us),
+            age_us: 0,
+            valid: true,
+            left: sides[0],
+            right: sides[1],
+        });
+        self.deliver(t_us)
+    }
+    pub fn deliver(&mut self, t_us: u64) -> EncoderOutput {
+        while self.pending.front().is_some_and(|v| v.available_us <= t_us) {
+            self.delivered = self.pending.pop_front().unwrap();
         }
+        self.delivered.age_us = t_us.saturating_sub(self.delivered.t_us);
+        self.delivered
     }
 }
-
-fn angle_to_ticks(angle_rad: f64, ticks_per_rev: u32, inverted: bool) -> i64 {
-    let sign = if inverted { -1.0 } else { 1.0 };
-    (sign * angle_rad / (2.0 * PI) * ticks_per_rev.max(1) as f64).round() as i64
-}
-
-fn ticks_to_angle(ticks: i64, ticks_per_rev: u32) -> f64 {
-    ticks as f64 * 2.0 * PI / ticks_per_rev.max(1) as f64
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

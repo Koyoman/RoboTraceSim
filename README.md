@@ -1,8 +1,8 @@
-# Robotrace Sim v0.08 — Comparação com dados reais
+# RoboTraceSim 0.6.0
 
 Simulador de robôs seguidores de linha em Rust com núcleo físico determinístico fixed-step, execução por terminal, interface gráfica `egui/eframe` e ferramentas de comparação entre simulação e robô real.
 
-A v0.08 preserva os recursos das versões anteriores e adiciona:
+O aplicativo inclui:
 
 - Importação/normalização de log real em CSV.
 - Comparação simulação vs robô real.
@@ -191,10 +191,71 @@ Ele não sobrescreve automaticamente o `robot.json`; em vez disso, gera um JSON 
 
 - A física continua determinística e desacoplada da UI.
 - A UI usa `egui::Painter` para renderização inicial, conforme a especificação.
-- O parser JSON próprio foi mantido para preservar a base sem `serde`.
+- O parser JSON próprio valida UTF-8, escapes Unicode, números finitos e sintaxe estrita.
 - O ajuste de parâmetros da v0.5 é propositalmente simples e revisável; modelos mais avançados podem adicionar otimização multiobjetivo, bounds configuráveis e exportação direta do `robot.json`.
 - O comando `batch` ainda permanece como próximo passo.
 
-## Limitação conhecida deste pacote
+## Configuração e sensores
 
-O ambiente usado para montar esta versão não possui `cargo`/`rustc` instalado, então não foi possível executar `cargo check` ou `cargo test` aqui. A revisão foi estática e os JSONs de exemplo foram validados com `python -m json.tool`.
+O schema atual de robô é `rtsim-robot-v8`. Cada sensor tem ID, pose, resposta, ADC, ruído e seed próprios. As leituras são geradas separadamente pela área e pose mundial de cada sensor, com aquisição, filtro, ADC e entrega individuais. Não existe compromisso de compatibilidade com APIs, formatos ou resultados antigos.
+
+Projetos e assets usam caminhos relativos ao arquivo proprietário. Sensores são salvos com assets incorporados; a API `io::experiment::save_project_bundle` produz uma pasta portável. Cada run com logs também grava `.experiment.json` com sua configuração congelada.
+
+Consulte [configuração e sensores](docs/etapa-3-configuracao-e-sensores.md), [contrato temporal](docs/etapa-1-executor-e-tempo.md), [dinâmica física](docs/etapa-2-dinamica-fisica.md) e [tarefas](tasks.md). As versões dos schemas são independentes da versão do aplicativo.
+
+Verificação local: `cargo test --offline --no-default-features`, `cargo test --offline` e `cargo fmt --all -- --check`. A compilação da GUI não equivale a teste interativo.
+
+### Montagem física — etapa 4
+
+O editor usa instâncias de rodas/apoios e sensores, massa medida ou calculada por componentes, COM XYZ e inércia. Há seleção, movimento, rotação, duplicação, alinhamento, grade e desfazer/refazer. O solver atual aceita a montagem simétrica de quatro rodas; configurações incompatíveis são recusadas ao iniciar. Veja [montagem, editor e limites](docs/etapa-4-montagem-e-editor.md).
+
+### Pista física e corrida — etapa 5
+
+A pista agora contém regiões de material/atrito, marcas ópticas e falhas, portais de largada/checkpoint/chegada e escolha explícita da pose inicial. O editor oferece reordenação, grade e desfazer/refazer. Sensores consultam geometria analítica; rodas consultam suas superfícies locais. Eventos são gravados em `.events.json` junto aos logs. Relevo permanece como metadado e contato independente será entregue na etapa 6.
+
+Veja [contratos, limites e testes](docs/etapa-5-pista-optica-e-corrida.md) e o [projeto de ensaio](examples/stage5/projeto.rtsim).
+
+### Fidelidade e contato por roda — etapa 6
+
+O editor permite escolher Ideal, Simplificado ou Realista reduzido e ajustar os subsistemas. Os novos modelos incluem forças individuais, aderência combinada, transferência quase estática de carga, rodas passivas, caster reduzido e refinamentos opcionais do pneu. Registros por roda acompanham CSV/replay em `.contacts.csv`.
+
+Projetos de exemplo: [Ideal](examples/physics/ideal.rtsim), [Simplificado](examples/physics/simplified.rtsim) e [Realista](examples/physics/realistic.rtsim). Consulte [equações, limitações, testes e desempenho](docs/etapa-6-fidelidade-e-contatos.md). O preset Realista exige calibração; a etapa 9 otimiza o contato e registra novas medições a 50 µs.
+
+```powershell
+cargo run --release --offline --no-default-features -- run examples/physics/simplified.rtsim --headless --csv target/stage6.csv --replay target/stage6.rtlog
+cargo run --release --offline --no-default-features -- benchmark examples/physics/realistic.rtsim --duration 100ms
+```
+
+### Motores, alimentação e downforce — etapa 7
+
+O bloco opcional `powertrain` habilita motores DC simples/elétricos, transmissão explícita, driver médio, bateria com curvas e RC, regeneração/proteções e fan/sucção acoplados à tensão. O editor permite ajustar parâmetros e a simulação registra `.power.csv` e `.power.events.json` junto aos resultados.
+
+Veja o [exemplo executável](examples/power/projeto.rtsim) e os [contratos, limites e testes](docs/etapa-7-motores-alimentacao-e-downforce.md). O modelo exige uma roda motriz por motor e ainda custa mais que tempo real no ensaio a 50 µs. A etapa 9 entrega cálculo/reprodução separados e documenta o custo restante.
+
+### Sensoriamento e controle — etapa 8
+
+O painel “Sensores e controle” configura aquisição individual/multiplexada, latência, filtros, encoder e IMU. O controlador recebe somente leituras entregues e pode usar controle de velocidade, recuperação da linha, odometria e perfil aprendido. Também há repetição de comandos e API de firmware em processo, sem carregar DLLs.
+
+O [exemplo de aquisição sequencial](examples/sensing/projeto.rtsim) usa física a 50 µs e controle a 1 ms. Registros `.sensors.jsonl` e `.commands.csv` acompanham os resultados. Veja os [contratos, aproximações e testes](docs/etapa-8-sensoriamento-e-controle.md). Validação: 135 testes sem GUI e 140 com GUI.
+
+### Cálculo, replay e batch — etapa 9
+
+A simulação roda em worker com pausa, retomada, passo e cancelamento. **Calcular e reproduzir** abre o resultado em um player por tempo, com velocidade e busca. Replay v4 registra a configuração congelada, canais, integridade e motivo de término; a leitura usa cache limitado. Importação, exportação, comparação e ajuste executam em segundo plano.
+
+```powershell
+cargo run --release --offline --no-default-features -- batch examples/batch/sweep.json --out target/sweep-001 --jobs 2
+```
+
+Veja [contratos, checkpoint e limites](docs/etapa-9-calculo-replay-e-experimentos.md) e [benchmarks reproduzíveis](docs/etapa-9-benchmarks.md). O checkpoint atual retoma somente em memória; não há persistência de estado físico em disco. A validação experimental dos modelos permanece na etapa 10.
+
+### Calibração e qualificação — etapa 10
+
+Há estudos versionados com dados de calibração/validação separados, objetivos e bounds configuráveis, sincronização explícita, métricas com cobertura e ensaios numéricos a 100/50/25 µs. A interface executa estudos e robustez em segundo plano. A CI verifica núcleo, GUI, formatos e regressões de software.
+
+```powershell
+cargo run --release --offline --no-default-features --example stage10_fixture -- target/stage10-fixture
+cargo run --release --offline --no-default-features -- qualify target/stage10-fixture/study.json target/stage10-qualification.json
+python scripts/check-qualification.py target/stage10-qualification.json
+```
+
+A fixture é **sintética**. Não há medições físicas qualificadas no repositório; `real_log_demo.csv` tem proveniência desconhecida. O Realista ainda não é validado experimentalmente. Veja [entregas e limites](docs/etapa-10-calibracao-e-qualificacao.md), [protocolo de bancada](docs/etapa-10-protocolo-experimental.md) e [pendências](tasks.md).

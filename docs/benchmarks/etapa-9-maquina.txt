@@ -1,0 +1,2 @@
+OS=windows ARCH=x86_64 CPUs=12 CPU=AMD64 Family 25 Model 33 Stepping 2, AuthenticAMD profile=release duration_us=100000 repeats=3
+Peak RSS is process lifetime high-water mark (not per-case allocations); zero means unavailable. Total includes initialization and synchronous scientific logs. loop includes writing/flushing. IO throughput is bytes/total, not isolated disk bandwidth. Worker poll measures API responsiveness, not rendered FPS.

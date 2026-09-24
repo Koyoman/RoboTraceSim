@@ -1,10 +1,10 @@
 use crate::json::{parse_json, JsonValue};
 use crate::math::{Pose2, Vec2};
 use crate::rtsim_track::{
-    build_geometry, resolve_robot_start_pose, resolve_rules, ArcSegment, RobotStartConfig,
-    StartExitDirection, StartFinishMarking, StraightSegment, TrackArea, TrackClosureConfig,
-    TrackCornerMarkersConfig, TrackMarkings, TrackPose, TrackRuleOverrides, TrackRulesConfig,
-    TrackRulesMode, TrackSegment, TrackSurfaceConfig, TrackV2,
+    build_geometry, resolve_rules, ArcSegment, RobotStartConfig, StartExitDirection,
+    StartFinishMarking, StraightSegment, TrackArea, TrackClosureConfig, TrackCornerMarkersConfig,
+    TrackMarkings, TrackPose, TrackRuleOverrides, TrackRulesConfig, TrackRulesMode, TrackSegment,
+    TrackSurfaceConfig, TrackV2,
 };
 use std::fmt;
 use std::fs;
@@ -83,7 +83,7 @@ pub struct ProjectConfig {
     pub replay_output: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimeConfig {
     pub physics_dt_us: u64,
     pub controller_period_us: u64,
@@ -110,6 +110,10 @@ impl Default for TimeConfig {
 
 #[derive(Debug, Clone)]
 pub struct RobotConfig {
+    pub sensing: crate::models::sensing::SensingConfig,
+    pub powertrain: Option<crate::models::electrical::PowertrainConfig>,
+    pub physics: Option<crate::models::fidelity::FidelityConfig>,
+    pub assembly: Option<crate::models::robot::RobotAssembly>,
     pub schema: String,
     pub name: String,
     pub chassis: ChassisConfig,
@@ -215,6 +219,8 @@ pub struct DrivetrainConfig {
 
 #[derive(Debug, Clone)]
 pub struct FanConfig {
+    pub nominal_rpm: f64,
+    pub id: String,
     pub position_m: Vec2,
     pub visual_radius_m: f64,
     pub action_radius_m: f64,
@@ -234,8 +240,7 @@ pub struct FanConfig {
 
 #[derive(Debug, Clone)]
 pub struct NormalForceConfig {
-    pub model: String,
-    pub model_kind: DownforceModel,
+    pub model: crate::io::models::NormalForceKind,
     pub command_pwm_default: f64,
     pub position_m: Vec2,
     pub max_force_n: f64,
@@ -260,6 +265,7 @@ pub struct TireConfig {
 
 #[derive(Debug, Clone)]
 pub struct MotorConfig {
+    pub nominal_voltage_v: f64,
     pub model: String,
     pub gear_ratio: f64,
     pub efficiency: f64,
@@ -392,7 +398,28 @@ pub struct SensorAsset {
 }
 
 #[derive(Debug, Clone)]
+pub struct SensorAcquisition {
+    pub adc_bits: u32,
+    pub reflectance_noise_std: f64,
+    pub adc_noise_lsb: f64,
+    pub seed: u64,
+}
+impl Default for SensorAcquisition {
+    fn default() -> Self {
+        Self {
+            adc_bits: 12,
+            reflectance_noise_std: 0.01,
+            adc_noise_lsb: 1.0,
+            seed: 1371,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct RobotSensorInstance {
+    pub height_m: f64,
+    pub acquisition: SensorAcquisition,
+    pub id: String,
     pub name: String,
     pub asset_path: PathBuf,
     pub asset: SensorAsset,
@@ -434,49 +461,6 @@ impl FanCurveModel {
 }
 
 #[derive(Debug, Clone)]
-pub enum DownforceModel {
-    None,
-    Constant {
-        force_n: f64,
-    },
-    LinearVoltage {
-        k_n_per_v: f64,
-        offset_n: f64,
-        max_force_n: f64,
-    },
-    LinearCurrent {
-        k_n_per_a: f64,
-        offset_n: f64,
-        max_force_n: f64,
-    },
-    Exponential {
-        a: f64,
-        b: f64,
-        max_force_n: f64,
-    },
-    Polynomial {
-        coefficients: Vec<f64>,
-        max_force_n: f64,
-    },
-    LookupTable {
-        points: Vec<DownforcePoint>,
-    },
-    Fan {
-        nominal_voltage_v: f64,
-        nominal_current_a: f64,
-        max_force_n: f64,
-        curve: FanCurveModel,
-        response_time_s: f64,
-    },
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct DownforcePoint {
-    pub input: f64,
-    pub force_n: f64,
-}
-
-#[derive(Debug, Clone)]
 pub struct EncoderConfig {
     pub model: String,
     pub ticks_per_rev: u32,
@@ -506,6 +490,7 @@ pub struct PidConfig {
 
 #[derive(Debug, Clone)]
 pub struct TrackConfig {
+    pub environment: crate::track::definition::TrackEnvironment,
     /// Schema of the file that was loaded/saved. `rtsim-track-v2` enables the
     /// parametric segment-based track editor; `rtsim-track-v1` remains supported
     /// as a sampled polyline cache.
@@ -524,6 +509,8 @@ pub struct TrackConfig {
 
 #[derive(Debug, Clone)]
 pub struct SurfaceProfile {
+    pub rule_source: String,
+    pub rule_edition: String,
     pub schema: String,
     pub name: String,
     pub rules_mode: TrackRulesMode,
@@ -590,6 +577,7 @@ impl TrackConfig {
     pub fn from_parametric(mut track: TrackV2) -> Self {
         track.schema = "rtsim-track-v2".to_string();
         let mut cfg = Self {
+            environment: Default::default(),
             schema: track.schema.clone(),
             name: track.name.clone(),
             model: "ParametricTrack".to_string(),
@@ -606,6 +594,10 @@ impl TrackConfig {
 }
 
 pub fn refresh_track_cache(track: &mut TrackConfig) {
+    if crate::track::definition::validate_definition(track).is_err() {
+        track.centerline.clear();
+        return;
+    }
     if let Some(parametric) = &mut track.parametric {
         let rules = resolve_rules(&parametric.rules);
         let geometry = build_geometry(parametric);
@@ -634,15 +626,12 @@ pub fn load_project(project_path: impl AsRef<Path>) -> CfgResult<LoadedConfig> {
     let robot = parse_robot_config(&robot_path, &robot_json)?;
     let track = parse_track_config(&track_path, &track_json)?;
     let mut project = project;
-    if let Some(parametric) = &track.parametric {
-        if let Some(start_pose) = resolve_robot_start_pose(parametric) {
-            project.start_pose = Pose2::new(
-                start_pose.x_mm / 1000.0,
-                start_pose.y_mm / 1000.0,
-                start_pose.heading_deg.to_radians(),
-            );
-        }
-    }
+    project.start_pose = crate::track::definition::effective_start_pose(&track, project.start_pose)
+        .map_err(|message| ConfigError::Invalid {
+            path: project_path.clone(),
+            field: "start_source".into(),
+            message,
+        })?;
 
     Ok(LoadedConfig {
         project_path,
@@ -719,6 +708,8 @@ pub fn load_sensor_asset_from_file(path: impl AsRef<Path>) -> Result<SensorAsset
 }
 
 pub fn apply_surface_profile(track: &mut TrackV2, profile: &SurfaceProfile) {
+    track.rules.source = profile.rule_source.clone();
+    track.rules.edition = profile.rule_edition.clone();
     track.rules.profile = profile.name.clone();
     track.rules.mode = profile.rules_mode;
     track.rules.overrides = profile.overrides;
@@ -732,6 +723,8 @@ pub fn apply_surface_profile(track: &mut TrackV2, profile: &SurfaceProfile) {
 
 pub fn surface_profile_from_track(track: &TrackV2) -> SurfaceProfile {
     SurfaceProfile {
+        rule_source: track.rules.source.clone(),
+        rule_edition: track.rules.edition.clone(),
         schema: "rtsim-surface-profile-v1".to_string(),
         name: track.rules.profile.clone(),
         rules_mode: track.rules.mode,
@@ -759,10 +752,16 @@ fn read_json(path: &Path) -> CfgResult<JsonValue> {
         path: path.to_path_buf(),
         source,
     })?;
-    parse_json(&text).map_err(|err| ConfigError::Json {
+    let value = parse_json(&text).map_err(|err| ConfigError::Json {
         path: path.to_path_buf(),
         message: err.to_string(),
-    })
+    })?;
+    crate::io::validation::validate_document(&value).map_err(|message| ConfigError::Invalid {
+        path: path.into(),
+        field: "document".into(),
+        message,
+    })?;
+    Ok(value)
 }
 
 fn parse_project_config(path: &Path, root: &JsonValue) -> CfgResult<ProjectConfig> {
@@ -774,6 +773,13 @@ fn parse_project_config(path: &Path, root: &JsonValue) -> CfgResult<ProjectConfi
 
     let sim = root.get("simulation");
     let duration_s = nested_num(path, sim, "duration_s", 10.0)?;
+    crate::core::clock::duration_seconds_to_us(duration_s).map_err(|message| {
+        ConfigError::Invalid {
+            path: path.to_path_buf(),
+            field: "simulation.duration_s".into(),
+            message,
+        }
+    })?;
     let start_pose = nested_pose(path, sim, "start_pose_m", Pose2::new(0.0, 0.0, 0.0))?;
 
     let csv_output = root
@@ -805,41 +811,49 @@ fn parse_time(path: &Path, value: Option<&JsonValue>) -> CfgResult<TimeConfig> {
     let Some(time) = value else {
         return Ok(defaults);
     };
-    let parsed = TimeConfig {
-        physics_dt_us: num_field(time, "physics_dt_us", defaults.physics_dt_us as f64) as u64,
-        controller_period_us: num_field(
-            time,
-            "controller_period_us",
-            defaults.controller_period_us as f64,
-        ) as u64,
-        sensor_period_us: num_field(time, "sensor_period_us", defaults.sensor_period_us as f64)
-            as u64,
-        imu_period_us: num_field(time, "imu_period_us", defaults.imu_period_us as f64) as u64,
-        encoder_period_us: num_field(time, "encoder_period_us", defaults.encoder_period_us as f64)
-            as u64,
-        log_period_us: num_field(time, "log_period_us", defaults.log_period_us as f64) as u64,
-        render_period_us: num_field(time, "render_period_us", defaults.render_period_us as f64)
-            as u64,
-    };
-    if parsed.physics_dt_us == 0
-        || parsed.controller_period_us == 0
-        || parsed.sensor_period_us == 0
-        || parsed.imu_period_us == 0
-        || parsed.encoder_period_us == 0
-        || parsed.log_period_us == 0
-    {
-        Err(ConfigError::Invalid {
+    if !matches!(time, JsonValue::Object(_)) {
+        return Err(ConfigError::Invalid {
             path: path.to_path_buf(),
-            field: "time".to_string(),
-            message: "periods must be positive integer microseconds".to_string(),
-        })
-    } else {
-        Ok(parsed)
+            field: "time".into(),
+            message: "expected object".into(),
+        });
     }
+    let period = |name: &str, default: u64| -> CfgResult<u64> {
+        let Some(value) = time.get(name) else {
+            return Ok(default);
+        };
+        let n = value.as_f64().filter(|n| {
+            n.is_finite()
+                && *n > 0.0
+                && n.fract() == 0.0
+                && *n <= crate::core::clock::MAX_EXACT_US as f64
+        });
+        n.map(|n| n as u64).ok_or_else(|| ConfigError::Invalid {
+            path: path.to_path_buf(),
+            field: format!("time.{name}"),
+            message: "expected positive integer microseconds within the exact JSON integer range"
+                .into(),
+        })
+    };
+    let parsed = TimeConfig {
+        physics_dt_us: period("physics_dt_us", defaults.physics_dt_us)?,
+        controller_period_us: period("controller_period_us", defaults.controller_period_us)?,
+        sensor_period_us: period("sensor_period_us", defaults.sensor_period_us)?,
+        imu_period_us: period("imu_period_us", defaults.imu_period_us)?,
+        encoder_period_us: period("encoder_period_us", defaults.encoder_period_us)?,
+        log_period_us: period("log_period_us", defaults.log_period_us)?,
+        render_period_us: period("render_period_us", defaults.render_period_us)?,
+    };
+    crate::core::scheduler::validate_time(&parsed).map_err(|message| ConfigError::Invalid {
+        path: path.to_path_buf(),
+        field: "time".into(),
+        message,
+    })?;
+    Ok(parsed)
 }
 
-fn parse_robot_config(path: &Path, root: &JsonValue) -> CfgResult<RobotConfig> {
-    let schema = str_field(path, root, "robot_schema", "rtsim-robot-v2")?.to_string();
+fn parse_robot_config_inner(path: &Path, root: &JsonValue) -> CfgResult<RobotConfig> {
+    let _schema = str_field(path, root, "robot_schema", "rtsim-robot-v8")?;
     let name = str_field(path, root, "name", "unnamed-robot")?.to_string();
 
     let chassis_json = required_obj(path, root, "chassis")?;
@@ -885,7 +899,11 @@ fn parse_robot_config(path: &Path, root: &JsonValue) -> CfgResult<RobotConfig> {
 
     let left_json = required_obj(path, motors_json, "left")?;
     let motor_left = parse_motor(left_json);
-    let motor_right = motor_left.clone();
+    let motor_right = root
+        .get("motors")
+        .and_then(|m| m.get("right"))
+        .map(parse_motor)
+        .unwrap_or_else(|| motor_left.clone());
 
     let driver = DriverConfig {
         model: nested_str(driver_json, "model", "PwmHBridge").to_string(),
@@ -916,13 +934,14 @@ fn parse_robot_config(path: &Path, root: &JsonValue) -> CfgResult<RobotConfig> {
         current_limit_a: nested_num(path, battery_json, "current_limit_a", 200.0)?,
     };
 
-    let mut sensors = parse_robot_sensor_instances(path, root.get("sensors"))?;
-    if let Some(shared) = sensors.first().cloned() {
-        for sensor in sensors.iter_mut().skip(1) {
-            sensor.asset_path = shared.asset_path.clone();
-            sensor.asset = shared.asset.clone();
-        }
-    }
+    let line_sensor = root.get("line_sensor").map(|v| parse_legacy_line_sensor(v));
+    let sensors = if root.get("sensors").is_some() {
+        parse_robot_sensor_instances(path, root.get("sensors"))?
+    } else if let Some(line) = &line_sensor {
+        migrate_line_sensors(line)
+    } else {
+        vec![default_robot_sensor_instance()]
+    };
     let line_validity_areas =
         parse_robot_line_validity_areas(path, root.get("line_validity_areas"), &chassis)?;
 
@@ -964,7 +983,44 @@ fn parse_robot_config(path: &Path, root: &JsonValue) -> CfgResult<RobotConfig> {
     }
 
     Ok(RobotConfig {
-        schema,
+        sensing: root
+            .get("sensing")
+            .map(crate::models::sensing::SensingConfig::from_value)
+            .transpose()
+            .map_err(|reason| ConfigError::Invalid {
+                path: path.to_path_buf(),
+                field: "sensing".into(),
+                message: reason,
+            })?
+            .unwrap_or_default(),
+        powertrain: root
+            .get("powertrain")
+            .map(crate::models::electrical::PowertrainConfig::from_value)
+            .transpose()
+            .map_err(|message| ConfigError::Invalid {
+                path: path.into(),
+                field: "powertrain".into(),
+                message,
+            })?,
+        physics: root
+            .get("physics")
+            .map(crate::models::fidelity::FidelityConfig::from_value)
+            .transpose()
+            .map_err(|message| ConfigError::Invalid {
+                path: path.into(),
+                field: "physics".into(),
+                message,
+            })?,
+        assembly: root
+            .get("assembly")
+            .map(crate::models::robot::RobotAssembly::from_json)
+            .transpose()
+            .map_err(|message| ConfigError::Invalid {
+                path: path.into(),
+                field: "assembly".into(),
+                message,
+            })?,
+        schema: "rtsim-robot-v8".into(),
         name,
         chassis,
         drivetrain,
@@ -1054,27 +1110,15 @@ fn parse_normal_force(path: &Path, root: Option<&JsonValue>) -> CfgResult<Normal
         .map(|v| parse_fans(path, v))
         .transpose()?
         .unwrap_or_default();
-    let model_kind = root
-        .and_then(|v| v.get("downforce_model"))
-        .map(|v| {
-            parse_downforce_model(
-                path,
-                v,
-                &model,
-                max_force_n,
-                response_time_s,
-                &force_curve,
-                &fans,
-            )
-        })
-        .transpose()?
-        .unwrap_or_else(|| {
-            default_downforce_model(&model, max_force_n, response_time_s, &force_curve, &fans)
-        });
 
     Ok(NormalForceConfig {
-        model,
-        model_kind,
+        model: crate::io::models::NormalForceKind::parse(&model).map_err(|message| {
+            ConfigError::Invalid {
+                path: path.into(),
+                field: "normal_force.model".into(),
+                message,
+            }
+        })?,
         command_pwm_default,
         position_m,
         max_force_n,
@@ -1119,6 +1163,12 @@ fn parse_fan_config(path: &Path, fan: &JsonValue, field: &str) -> CfgResult<FanC
     let nominal_voltage_v = num_field(fan, "nominal_voltage_v", 7.4);
     let nominal_current_a = num_field(fan, "nominal_current_a", max_current_a);
     Ok(FanConfig {
+        nominal_rpm: num_field(fan, "nominal_rpm", 30000.),
+        id: fan
+            .get("id")
+            .and_then(JsonValue::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| field.to_string()),
         position_m,
         visual_radius_m: num_field(fan, "visual_radius_mm", 12.0) / 1000.0,
         action_radius_m: num_field(fan, "action_radius_mm", 20.0) / 1000.0,
@@ -1169,12 +1219,19 @@ fn parse_curve(path: &Path, value: &JsonValue, field: &str) -> CfgResult<Vec<(f6
         })?;
         curve.push((x, y));
     }
-    curve.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    if curve.windows(2).any(|w| w[0].0 >= w[1].0) {
+        return Err(ConfigError::Invalid {
+            path: path.into(),
+            field: field.into(),
+            message: "curve inputs must be strictly increasing".into(),
+        });
+    }
     Ok(curve)
 }
 
 fn parse_motor(value: &JsonValue) -> MotorConfig {
     MotorConfig {
+        nominal_voltage_v: num_field(value, "nominal_voltage_v", 7.4),
         model: value
             .get("model")
             .and_then(JsonValue::as_str)
@@ -1189,10 +1246,29 @@ fn parse_motor(value: &JsonValue) -> MotorConfig {
 }
 
 fn parse_track_config(path: &Path, root: &JsonValue) -> CfgResult<TrackConfig> {
+    let environment = root
+        .get("environment")
+        .map(crate::track::definition::TrackEnvironment::from_value)
+        .transpose()
+        .map_err(|message| ConfigError::Invalid {
+            path: path.into(),
+            field: "environment".into(),
+            message,
+        })?
+        .unwrap_or_default();
     let schema = str_field(path, root, "track_schema", "rtsim-track-v1")?.to_string();
     if schema == "rtsim-track-v2" {
         let parametric = parse_track_v2(path, root)?;
-        return Ok(TrackConfig::from_parametric(parametric));
+        let mut track = TrackConfig::from_parametric(parametric);
+        track.environment = environment;
+        crate::track::definition::validate_definition(&track).map_err(|message| {
+            ConfigError::Invalid {
+                path: path.into(),
+                field: "track".into(),
+                message,
+            }
+        })?;
+        return Ok(track);
     }
 
     let name = str_field(path, root, "name", "unnamed-track")?.to_string();
@@ -1203,7 +1279,8 @@ fn parse_track_config(path: &Path, root: &JsonValue) -> CfgResult<TrackConfig> {
     let surface_mu = num_field(root, "surface_mu", 1.2);
     let centerline = parse_centerline(path, root)?;
 
-    Ok(TrackConfig {
+    let track = TrackConfig {
+        environment,
         schema,
         name,
         model,
@@ -1213,7 +1290,15 @@ fn parse_track_config(path: &Path, root: &JsonValue) -> CfgResult<TrackConfig> {
         surface_mu,
         centerline,
         parametric: None,
-    })
+    };
+    crate::track::definition::validate_definition(&track).map_err(|message| {
+        ConfigError::Invalid {
+            path: path.into(),
+            field: "track".into(),
+            message,
+        }
+    })?;
+    Ok(track)
 }
 
 fn parse_track_v2(path: &Path, root: &JsonValue) -> CfgResult<TrackV2> {
@@ -1265,6 +1350,8 @@ fn parse_track_rules(path: &Path, value: Option<&JsonValue>) -> CfgResult<TrackR
     let mode = TrackRulesMode::from_str(nested_str(value, "mode", "warning"));
     let overrides = parse_track_rule_overrides(path, value.and_then(|v| v.get("overrides")))?;
     Ok(TrackRulesConfig {
+        source: nested_str(value, "source", "").into(),
+        edition: nested_str(value, "edition", "").into(),
         profile,
         mode,
         overrides,
@@ -1366,6 +1453,8 @@ fn parse_surface_profile_config(path: &Path, root: &JsonValue) -> CfgResult<Surf
         .unwrap_or(nested_num(path, surface_json, "line_reflectance", 0.86)?);
 
     Ok(SurfaceProfile {
+        rule_source: nested_str(rules_json, "source", "").into(),
+        rule_edition: nested_str(rules_json, "edition", "").into(),
         schema,
         name: name.clone(),
         rules_mode,
@@ -1557,6 +1646,9 @@ fn default_sensor_asset() -> SensorAsset {
 
 fn default_robot_sensor_instance() -> RobotSensorInstance {
     RobotSensorInstance {
+        height_m: 0.0,
+        acquisition: SensorAcquisition::default(),
+        id: "sensor-1".into(),
         name: "Front line sensor".to_string(),
         asset_path: PathBuf::from("RobotAssets/Sensors/default_line_sensor.json"),
         asset: default_sensor_asset(),
@@ -1601,20 +1693,19 @@ fn parse_robot_sensor_instance(
         .get("asset_path")
         .and_then(JsonValue::as_str)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("RobotAssets/Sensors/default_line_sensor.json"));
+        .unwrap_or_default();
     let asset = if let Some(asset_json) = item.get("asset") {
         parse_sensor_asset_config(path, asset_json)?
     } else {
-        let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
-        let resolved = if asset_path.is_absolute() || asset_path.exists() {
-            asset_path.clone()
-        } else {
-            normalize_child_path(base_dir, &asset_path)
-        };
-        read_json(&resolved)
-            .ok()
-            .and_then(|json| parse_sensor_asset_config(&resolved, &json).ok())
-            .unwrap_or_else(default_sensor_asset)
+        if asset_path.as_os_str().is_empty() {
+            return Err(ConfigError::Missing {
+                path: path.to_path_buf(),
+                field: format!("sensors[{index}].asset ou asset_path"),
+            });
+        }
+        let resolved = crate::io::assets::resolve_from_file(path, &asset_path);
+        let json = read_json(&resolved)?;
+        parse_sensor_asset_config(&resolved, &json)?
     };
     let position_m = item
         .get("position_mm")
@@ -1625,7 +1716,30 @@ fn parse_robot_sensor_instance(
                 num_field(item, "position_y_mm", 0.0) / 1000.0,
             )
         });
+    let acquisition = item.get("acquisition");
     Ok(RobotSensorInstance {
+        height_m: nested_num(path, Some(item), "height_mm", 0.0)? / 1000.0,
+        acquisition: SensorAcquisition {
+            adc_bits: nested_num(path, acquisition, "adc_bits", 12.0)? as u32,
+            reflectance_noise_std: nested_num(path, acquisition, "reflectance_noise_std", 0.01)?,
+            adc_noise_lsb: nested_num(path, acquisition, "adc_noise_lsb", 1.0)?,
+            seed: nested_num(path, acquisition, "seed", {
+                // Stable ID-based default: reordering or disabling another device must not reseed it.
+                let id = item
+                    .get("id")
+                    .and_then(JsonValue::as_str)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("sensor-{}", index + 1));
+                (id.bytes()
+                    .fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619)))
+                    as f64
+            })? as u64,
+        },
+        id: item
+            .get("id")
+            .and_then(JsonValue::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("sensor-{}", index + 1)),
         name: if name == "Sensor" {
             format!("Sensor {}", index + 1)
         } else {
@@ -1871,169 +1985,6 @@ fn parse_sensor_response_points(
 fn parse_number_array(value: Option<&JsonValue>) -> Option<Vec<f64>> {
     let arr = value?.as_array()?;
     Some(arr.iter().filter_map(JsonValue::as_f64).collect())
-}
-
-fn default_downforce_model(
-    model: &str,
-    max_force_n: f64,
-    response_time_s: f64,
-    force_curve: &[(f64, f64)],
-    fans: &[FanConfig],
-) -> DownforceModel {
-    match model.to_ascii_lowercase().as_str() {
-        "constantdownforce" => DownforceModel::Constant {
-            force_n: max_force_n,
-        },
-        "fandownforce" => {
-            let fan = fans.first();
-            DownforceModel::Fan {
-                nominal_voltage_v: fan.map(|f| f.nominal_voltage_v).unwrap_or(7.4),
-                nominal_current_a: fan.map(|f| f.nominal_current_a).unwrap_or(0.0),
-                max_force_n: fan.map(|f| f.max_force_n).unwrap_or(max_force_n),
-                curve: fan
-                    .map(|f| f.curve_model)
-                    .unwrap_or(FanCurveModel::LookupTable),
-                response_time_s: fan.map(|f| f.response_time_s).unwrap_or(response_time_s),
-            }
-        }
-        "measureddownforcecurve" => DownforceModel::LookupTable {
-            points: force_curve
-                .iter()
-                .map(|(input, force_n)| DownforcePoint {
-                    input: *input,
-                    force_n: *force_n,
-                })
-                .collect(),
-        },
-        _ => DownforceModel::None,
-    }
-}
-
-fn parse_downforce_model(
-    path: &Path,
-    value: &JsonValue,
-    fallback_model: &str,
-    max_force_n: f64,
-    response_time_s: f64,
-    force_curve: &[(f64, f64)],
-    fans: &[FanConfig],
-) -> CfgResult<DownforceModel> {
-    let kind = value
-        .as_str()
-        .or_else(|| {
-            value
-                .get("kind")
-                .or_else(|| value.get("type"))
-                .and_then(JsonValue::as_str)
-        })
-        .unwrap_or(fallback_model);
-    Ok(match kind.to_ascii_lowercase().as_str() {
-        "none" | "nodownforce" => DownforceModel::None,
-        "constant" | "constantdownforce" => DownforceModel::Constant {
-            force_n: nested_num(path, Some(value), "force_n", max_force_n)?,
-        },
-        "linearvoltage" | "linear_voltage" => DownforceModel::LinearVoltage {
-            k_n_per_v: nested_num(path, Some(value), "k_n_per_v", 0.0)?,
-            offset_n: nested_num(path, Some(value), "offset_n", 0.0)?,
-            max_force_n: nested_num(path, Some(value), "max_force_n", max_force_n)?,
-        },
-        "linearcurrent" | "linear_current" => DownforceModel::LinearCurrent {
-            k_n_per_a: nested_num(path, Some(value), "k_n_per_a", 0.0)?,
-            offset_n: nested_num(path, Some(value), "offset_n", 0.0)?,
-            max_force_n: nested_num(path, Some(value), "max_force_n", max_force_n)?,
-        },
-        "exponential" => DownforceModel::Exponential {
-            a: nested_num(path, Some(value), "a", 0.0)?,
-            b: nested_num(path, Some(value), "b", 1.0)?,
-            max_force_n: nested_num(path, Some(value), "max_force_n", max_force_n)?,
-        },
-        "polynomial" => DownforceModel::Polynomial {
-            coefficients: parse_number_array(value.get("coefficients"))
-                .unwrap_or_else(|| vec![0.0, 1.0]),
-            max_force_n: nested_num(path, Some(value), "max_force_n", max_force_n)?,
-        },
-        "lookuptable" | "lookup_table" | "measureddownforcecurve" => DownforceModel::LookupTable {
-            points: value
-                .get("points")
-                .map(|points| parse_downforce_points(path, points, "downforce_model.points"))
-                .transpose()?
-                .unwrap_or_else(|| {
-                    force_curve
-                        .iter()
-                        .map(|(input, force_n)| DownforcePoint {
-                            input: *input,
-                            force_n: *force_n,
-                        })
-                        .collect()
-                }),
-        },
-        "fan" | "fandownforce" => {
-            let fan = fans.first();
-            DownforceModel::Fan {
-                nominal_voltage_v: nested_num(
-                    path,
-                    Some(value),
-                    "nominal_voltage_v",
-                    fan.map(|f| f.nominal_voltage_v).unwrap_or(7.4),
-                )?,
-                nominal_current_a: nested_num(
-                    path,
-                    Some(value),
-                    "nominal_current_a",
-                    fan.map(|f| f.nominal_current_a).unwrap_or(0.0),
-                )?,
-                max_force_n: nested_num(
-                    path,
-                    Some(value),
-                    "max_force_n",
-                    fan.map(|f| f.max_force_n).unwrap_or(max_force_n),
-                )?,
-                curve: FanCurveModel::from_str(nested_str(Some(value), "curve", "LookupTable")),
-                response_time_s: nested_num(
-                    path,
-                    Some(value),
-                    "response_time_s",
-                    fan.map(|f| f.response_time_s).unwrap_or(response_time_s),
-                )?,
-            }
-        }
-        _ => default_downforce_model(
-            fallback_model,
-            max_force_n,
-            response_time_s,
-            force_curve,
-            fans,
-        ),
-    })
-}
-
-fn parse_downforce_points(
-    path: &Path,
-    value: &JsonValue,
-    field: &str,
-) -> CfgResult<Vec<DownforcePoint>> {
-    let arr = value.as_array().ok_or_else(|| ConfigError::Invalid {
-        path: path.to_path_buf(),
-        field: field.to_string(),
-        message: "expected array".to_string(),
-    })?;
-    let mut points = Vec::with_capacity(arr.len());
-    for (i, item) in arr.iter().enumerate() {
-        if let Some(pair) = item.as_array() {
-            if pair.len() == 2 {
-                points.push(DownforcePoint {
-                    input: pair[0].as_f64().unwrap_or(0.0),
-                    force_n: pair[1].as_f64().unwrap_or(0.0),
-                });
-                continue;
-            }
-        }
-        points.push(DownforcePoint {
-            input: nested_num(path, Some(item), "input", i as f64)?,
-            force_n: nested_num(path, Some(item), "force_n", 0.0)?,
-        });
-    }
-    Ok(points)
 }
 
 fn parse_track_surface(path: &Path, value: Option<&JsonValue>) -> CfgResult<TrackSurfaceConfig> {
@@ -2348,4 +2299,79 @@ mod robot_line_validity_tests {
             0.020,
         ));
     }
+}
+
+fn parse_legacy_line_sensor(v: &JsonValue) -> LineSensorConfig {
+    LineSensorConfig {
+        count: num_field(v, "count", 16.0) as usize,
+        width_m: num_field(v, "width_mm", 72.0) / 1000.0,
+        forward_offset_m: num_field(v, "forward_offset_mm", 55.0) / 1000.0,
+        adc_bits: num_field(v, "adc_bits", 12.0) as u32,
+        gain: num_field(v, "gain", 1.0),
+        offset: num_field(v, "offset", 0.0),
+        reflectance_noise_std: num_field(v, "reflectance_noise_std", 0.01),
+        adc_noise_lsb: num_field(v, "adc_noise_lsb", 1.0),
+        seed: num_field(v, "seed", 1371.0) as u64,
+    }
+}
+fn migrate_line_sensors(line: &LineSensorConfig) -> Vec<RobotSensorInstance> {
+    (0..line.count)
+        .map(|i| {
+            let mut s = default_robot_sensor_instance();
+            s.acquisition = SensorAcquisition {
+                adc_bits: line.adc_bits,
+                reflectance_noise_std: line.reflectance_noise_std,
+                adc_noise_lsb: line.adc_noise_lsb,
+                seed: line.seed.wrapping_add(i as u64),
+            };
+            s.id = format!("sensor-{}", i + 1);
+            s.name = format!("Line {}", i + 1);
+            s.asset_path = PathBuf::new();
+            s.position_m = Vec2::new(
+                line.forward_offset_m,
+                if line.count <= 1 {
+                    0.0
+                } else {
+                    line.width_m * (0.5 - i as f64 / (line.count - 1) as f64)
+                },
+            );
+            s.asset.response_model = SensorResponseModel::Linear {
+                gain: line.gain,
+                offset: line.offset,
+            };
+            s
+        })
+        .collect()
+}
+
+fn parse_robot_config(path: &Path, root: &JsonValue) -> CfgResult<RobotConfig> {
+    let robot = parse_robot_config_inner(path, root)?;
+    crate::io::validation::validate_robot(&robot).map_err(|message| ConfigError::Invalid {
+        path: path.into(),
+        field: "robot".into(),
+        message,
+    })?;
+    Ok(robot)
+}
+
+pub fn config_from_snapshot(root: &JsonValue) -> Result<LoadedConfig, String> {
+    let path = Path::new("embedded-replay.rtsim");
+    let robot = root.get("robot").ok_or("snapshot robot missing")?;
+    if let Some(sensors) = robot.get("sensors").and_then(JsonValue::as_array) {
+        if sensors.iter().any(|s| s.get("asset").is_none()) {
+            return Err("snapshot must embed sensor assets".into());
+        }
+    }
+    let project =
+        parse_project_config(path, root.get("project").ok_or("snapshot project missing")?)
+            .map_err(|e| e.to_string())?;
+    let robot = parse_robot_config(path, robot).map_err(|e| e.to_string())?;
+    let track = parse_track_config(path, root.get("track").ok_or("snapshot track missing")?)
+        .map_err(|e| e.to_string())?;
+    Ok(LoadedConfig {
+        project_path: path.into(),
+        project,
+        robot,
+        track,
+    })
 }

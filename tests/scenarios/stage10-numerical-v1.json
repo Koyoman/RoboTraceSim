@@ -1,0 +1,19 @@
+{
+  "schema": "rtsim-numerical-baseline-v1",
+  "kind": "numerical_not_measured",
+  "app_version": "0.6.0",
+  "project": "examples/physics/simplified.rtsim",
+  "duration_us": 100000,
+  "physics_dt_us": 50,
+  "seed": 1371,
+  "mu_longitudinal_scale": 1,
+  "absolute_tolerance": 1e-09,
+  "basis": "Floating-point software regression threshold, not an experimental accuracy specification. Update only with reviewed model changes.",
+  "expected_final": {
+    "x_m": 0.6527495810912167,
+    "y_m": 0.5000999037269602,
+    "yaw_rad": 0.0027763580635766253,
+    "vx_body_m_s": 0.03335022723911083,
+    "battery_current_a": 2.3472959173221892
+  }
+}

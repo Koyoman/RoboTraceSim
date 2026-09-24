@@ -1,6 +1,7 @@
 {
-  "robot_schema": "rtsim-robot-v3",
-  "name": "Simple N20 PID Robot v0.08 SuctionDownforce",
+  "robot_schema": "rtsim-robot-v8",
+  "name": "Simple N20 PID Robot 0.6.0 SuctionDownforce",
+  "assembly": {"mass_mode":"measured","measured_com_height_mm":0,"wheels":[{"id":"wheel:left:front","position_mm":[42,41],"height_mm":0,"angle_deg":0,"radius_mm":10,"width_mm":10,"inertia_kg_m2":0.00000005,"material":"default","motor":"motor:left","kind":"driven","tire":{"model":"SlipRatioWheel","mu_longitudinal":1.2,"mu_lateral":1,"rolling_resistance":0.015,"slip_velocity_epsilon_m_s":0.05}},{"id":"wheel:left:rear","position_mm":[-42,41],"height_mm":0,"angle_deg":0,"radius_mm":10,"width_mm":10,"inertia_kg_m2":0.00000005,"material":"default","motor":"motor:left","kind":"driven","tire":{"model":"SlipRatioWheel","mu_longitudinal":1.2,"mu_lateral":1,"rolling_resistance":0.015,"slip_velocity_epsilon_m_s":0.05}},{"id":"wheel:right:front","position_mm":[42,-41],"height_mm":0,"angle_deg":0,"radius_mm":10,"width_mm":10,"inertia_kg_m2":0.00000005,"material":"default","motor":"motor:right","kind":"driven","tire":{"model":"SlipRatioWheel","mu_longitudinal":1.2,"mu_lateral":1,"rolling_resistance":0.015,"slip_velocity_epsilon_m_s":0.05}},{"id":"wheel:right:rear","position_mm":[-42,-41],"height_mm":0,"angle_deg":0,"radius_mm":10,"width_mm":10,"inertia_kg_m2":0.00000005,"material":"default","motor":"motor:right","kind":"driven","tire":{"model":"SlipRatioWheel","mu_longitudinal":1.2,"mu_lateral":1,"rolling_resistance":0.015,"slip_velocity_epsilon_m_s":0.05}}],"masses":[{"id":"mass:chassis","component":"chassis","mass_g":180,"position_mm":[0,0],"height_mm":0,"inertia_kg_m2":0.00045},{"id":"mass:battery","component":"battery","mass_g":0,"position_mm":[0,0],"height_mm":0,"inertia_kg_m2":0},{"id":"mass:motor:left","component":"motor:left","mass_g":0,"position_mm":[0,0],"height_mm":0,"inertia_kg_m2":0},{"id":"mass:motor:right","component":"motor:right","mass_g":0,"position_mm":[0,0],"height_mm":0,"inertia_kg_m2":0}]},
   "chassis": {
     "model": "RigidBody2DChassis",
     "mass_g": 180,
@@ -11,15 +12,17 @@
   },
   "normal_force": {
     "model": "SuctionDownforce",
-    "default_pwm": 0.80,
+    "default_pwm": 0.8,
     "position_mm": [0, 0],
-    "chamber_area_m2": 0.0048,
-    "max_delta_pressure_pa": 520,
     "max_force_n": 2.2,
     "max_current_a": 1.8,
-    "leakage_factor": 0.10,
     "response_time_s": 0.055,
-    "force_curve": [[0.0, 0.0], [0.35, 0.15], [0.60, 0.75], [0.80, 1.45], [1.0, 2.20]]
+    "chamber_area_m2": 0.0048,
+    "max_delta_pressure_pa": 520,
+    "leakage_factor": 0.1,
+    "speed_sensitivity": 0,
+    "force_curve": [[0, 0], [0.35, 0.15], [0.6, 0.75], [0.8, 1.45], [1, 2.2]],
+    "fans": []
   },
   "drivetrain": {
     "type": "DifferentialDrive4Wheel",
@@ -27,30 +30,32 @@
     "wheel_width_mm": 10,
     "track_width_mm": 82,
     "wheelbase_mm": 84,
-    "wheel_inertia_g_cm2": 1.0
+    "wheel_inertia_g_cm2": 1
   },
   "tire": {
     "model": "SlipRatioWheel",
-    "mu_longitudinal": 1.20,
-    "mu_lateral": 1.00,
+    "mu_longitudinal": 1.2,
+    "mu_lateral": 1,
     "rolling_resistance": 0.015,
     "slip_velocity_epsilon_m_s": 0.05
   },
   "motors": {
     "left": {
       "model": "DcMotorSimple",
+      "nominal_voltage_v": 7.4,
       "gear_ratio": 30,
       "efficiency": 0.75,
       "no_load_rpm": 1800,
-      "stall_torque_mnm": 5.0,
+      "stall_torque_mnm": 5,
       "stall_current_a": 1.6
     },
     "right": {
       "model": "DcMotorSimple",
+      "nominal_voltage_v": 7.4,
       "gear_ratio": 30,
       "efficiency": 0.75,
       "no_load_rpm": 1800,
-      "stall_torque_mnm": 5.0,
+      "stall_torque_mnm": 5,
       "stall_current_a": 1.6
     }
   },
@@ -61,7 +66,7 @@
     "voltage_drop_v": 0.2,
     "pwm_resolution_bits": 10,
     "command_deadband": 0.001,
-    "current_limit_a": 3.0
+    "current_limit_a": 3
   },
   "battery": {
     "model": "VoltageSagBattery",
@@ -71,21 +76,325 @@
     "cells": 2,
     "capacity_mah": 300,
     "internal_resistance_ohm": 0.08,
-    "initial_soc": 1.0,
-    "current_limit_a": 60.0
+    "initial_soc": 1,
+    "current_limit_a": 60
   },
-  "line_sensor": {
-    "model": "NoisyAdcSensor",
-    "count": 16,
-    "width_mm": 72,
-    "forward_offset_mm": 55,
-    "adc_bits": 12,
-    "gain": 1.0,
-    "offset": 0.0,
-    "reflectance_noise_std": 0.01,
-    "adc_noise_lsb": 1.0,
-    "seed": 1371
-  },
+  "sensors": [
+{"acquisition":{"adc_bits":12,"reflectance_noise_std":0.01,"adc_noise_lsb":1,"seed":1371},"id":"sensor-1","name":"Line 1","asset_path":"","asset":{
+        "name": "Default Line Sensor",
+        "model": "GenericAnalogLineSensor",
+        "sensor_type": "LineAnalog",
+        "visual_width_mm": 8,
+        "visual_height_mm": 8,
+        "visual_radius_mm": 4,
+        "detection_area": {
+          "kind": "Rectangle",
+          "width_mm": 5,
+          "height_mm": 2
+        },
+        "response_model": {
+          "kind": "Linear",
+          "gain": 1,
+          "offset": 0
+        },
+        "notes": ""
+      },"position_mm":[55,36],"height_mm":0,"angle_deg":0,"enabled":true,"visible_in_preview":true},
+{"acquisition":{"adc_bits":12,"reflectance_noise_std":0.01,"adc_noise_lsb":1,"seed":1372},"id":"sensor-2","name":"Line 2","asset_path":"","asset":{
+        "name": "Default Line Sensor",
+        "model": "GenericAnalogLineSensor",
+        "sensor_type": "LineAnalog",
+        "visual_width_mm": 8,
+        "visual_height_mm": 8,
+        "visual_radius_mm": 4,
+        "detection_area": {
+          "kind": "Rectangle",
+          "width_mm": 5,
+          "height_mm": 2
+        },
+        "response_model": {
+          "kind": "Linear",
+          "gain": 1,
+          "offset": 0
+        },
+        "notes": ""
+      },"position_mm":[55,31.2],"height_mm":0,"angle_deg":0,"enabled":true,"visible_in_preview":true},
+{"acquisition":{"adc_bits":12,"reflectance_noise_std":0.01,"adc_noise_lsb":1,"seed":1373},"id":"sensor-3","name":"Line 3","asset_path":"","asset":{
+        "name": "Default Line Sensor",
+        "model": "GenericAnalogLineSensor",
+        "sensor_type": "LineAnalog",
+        "visual_width_mm": 8,
+        "visual_height_mm": 8,
+        "visual_radius_mm": 4,
+        "detection_area": {
+          "kind": "Rectangle",
+          "width_mm": 5,
+          "height_mm": 2
+        },
+        "response_model": {
+          "kind": "Linear",
+          "gain": 1,
+          "offset": 0
+        },
+        "notes": ""
+      },"position_mm":[55,26.4],"height_mm":0,"angle_deg":0,"enabled":true,"visible_in_preview":true},
+{"acquisition":{"adc_bits":12,"reflectance_noise_std":0.01,"adc_noise_lsb":1,"seed":1374},"id":"sensor-4","name":"Line 4","asset_path":"","asset":{
+        "name": "Default Line Sensor",
+        "model": "GenericAnalogLineSensor",
+        "sensor_type": "LineAnalog",
+        "visual_width_mm": 8,
+        "visual_height_mm": 8,
+        "visual_radius_mm": 4,
+        "detection_area": {
+          "kind": "Rectangle",
+          "width_mm": 5,
+          "height_mm": 2
+        },
+        "response_model": {
+          "kind": "Linear",
+          "gain": 1,
+          "offset": 0
+        },
+        "notes": ""
+      },"position_mm":[55,21.599999999999998],"height_mm":0,"angle_deg":0,"enabled":true,"visible_in_preview":true},
+{"acquisition":{"adc_bits":12,"reflectance_noise_std":0.01,"adc_noise_lsb":1,"seed":1375},"id":"sensor-5","name":"Line 5","asset_path":"","asset":{
+        "name": "Default Line Sensor",
+        "model": "GenericAnalogLineSensor",
+        "sensor_type": "LineAnalog",
+        "visual_width_mm": 8,
+        "visual_height_mm": 8,
+        "visual_radius_mm": 4,
+        "detection_area": {
+          "kind": "Rectangle",
+          "width_mm": 5,
+          "height_mm": 2
+        },
+        "response_model": {
+          "kind": "Linear",
+          "gain": 1,
+          "offset": 0
+        },
+        "notes": ""
+      },"position_mm":[55,16.8],"height_mm":0,"angle_deg":0,"enabled":true,"visible_in_preview":true},
+{"acquisition":{"adc_bits":12,"reflectance_noise_std":0.01,"adc_noise_lsb":1,"seed":1376},"id":"sensor-6","name":"Line 6","asset_path":"","asset":{
+        "name": "Default Line Sensor",
+        "model": "GenericAnalogLineSensor",
+        "sensor_type": "LineAnalog",
+        "visual_width_mm": 8,
+        "visual_height_mm": 8,
+        "visual_radius_mm": 4,
+        "detection_area": {
+          "kind": "Rectangle",
+          "width_mm": 5,
+          "height_mm": 2
+        },
+        "response_model": {
+          "kind": "Linear",
+          "gain": 1,
+          "offset": 0
+        },
+        "notes": ""
+      },"position_mm":[55,12],"height_mm":0,"angle_deg":0,"enabled":true,"visible_in_preview":true},
+{"acquisition":{"adc_bits":12,"reflectance_noise_std":0.01,"adc_noise_lsb":1,"seed":1377},"id":"sensor-7","name":"Line 7","asset_path":"","asset":{
+        "name": "Default Line Sensor",
+        "model": "GenericAnalogLineSensor",
+        "sensor_type": "LineAnalog",
+        "visual_width_mm": 8,
+        "visual_height_mm": 8,
+        "visual_radius_mm": 4,
+        "detection_area": {
+          "kind": "Rectangle",
+          "width_mm": 5,
+          "height_mm": 2
+        },
+        "response_model": {
+          "kind": "Linear",
+          "gain": 1,
+          "offset": 0
+        },
+        "notes": ""
+      },"position_mm":[55,7.199999999999998],"height_mm":0,"angle_deg":0,"enabled":true,"visible_in_preview":true},
+{"acquisition":{"adc_bits":12,"reflectance_noise_std":0.01,"adc_noise_lsb":1,"seed":1378},"id":"sensor-8","name":"Line 8","asset_path":"","asset":{
+        "name": "Default Line Sensor",
+        "model": "GenericAnalogLineSensor",
+        "sensor_type": "LineAnalog",
+        "visual_width_mm": 8,
+        "visual_height_mm": 8,
+        "visual_radius_mm": 4,
+        "detection_area": {
+          "kind": "Rectangle",
+          "width_mm": 5,
+          "height_mm": 2
+        },
+        "response_model": {
+          "kind": "Linear",
+          "gain": 1,
+          "offset": 0
+        },
+        "notes": ""
+      },"position_mm":[55,2.3999999999999995],"height_mm":0,"angle_deg":0,"enabled":true,"visible_in_preview":true},
+{"acquisition":{"adc_bits":12,"reflectance_noise_std":0.01,"adc_noise_lsb":1,"seed":1379},"id":"sensor-9","name":"Line 9","asset_path":"","asset":{
+        "name": "Default Line Sensor",
+        "model": "GenericAnalogLineSensor",
+        "sensor_type": "LineAnalog",
+        "visual_width_mm": 8,
+        "visual_height_mm": 8,
+        "visual_radius_mm": 4,
+        "detection_area": {
+          "kind": "Rectangle",
+          "width_mm": 5,
+          "height_mm": 2
+        },
+        "response_model": {
+          "kind": "Linear",
+          "gain": 1,
+          "offset": 0
+        },
+        "notes": ""
+      },"position_mm":[55,-2.3999999999999995],"height_mm":0,"angle_deg":0,"enabled":true,"visible_in_preview":true},
+{"acquisition":{"adc_bits":12,"reflectance_noise_std":0.01,"adc_noise_lsb":1,"seed":1380},"id":"sensor-10","name":"Line 10","asset_path":"","asset":{
+        "name": "Default Line Sensor",
+        "model": "GenericAnalogLineSensor",
+        "sensor_type": "LineAnalog",
+        "visual_width_mm": 8,
+        "visual_height_mm": 8,
+        "visual_radius_mm": 4,
+        "detection_area": {
+          "kind": "Rectangle",
+          "width_mm": 5,
+          "height_mm": 2
+        },
+        "response_model": {
+          "kind": "Linear",
+          "gain": 1,
+          "offset": 0
+        },
+        "notes": ""
+      },"position_mm":[55,-7.199999999999998],"height_mm":0,"angle_deg":0,"enabled":true,"visible_in_preview":true},
+{"acquisition":{"adc_bits":12,"reflectance_noise_std":0.01,"adc_noise_lsb":1,"seed":1381},"id":"sensor-11","name":"Line 11","asset_path":"","asset":{
+        "name": "Default Line Sensor",
+        "model": "GenericAnalogLineSensor",
+        "sensor_type": "LineAnalog",
+        "visual_width_mm": 8,
+        "visual_height_mm": 8,
+        "visual_radius_mm": 4,
+        "detection_area": {
+          "kind": "Rectangle",
+          "width_mm": 5,
+          "height_mm": 2
+        },
+        "response_model": {
+          "kind": "Linear",
+          "gain": 1,
+          "offset": 0
+        },
+        "notes": ""
+      },"position_mm":[55,-11.999999999999996],"height_mm":0,"angle_deg":0,"enabled":true,"visible_in_preview":true},
+{"acquisition":{"adc_bits":12,"reflectance_noise_std":0.01,"adc_noise_lsb":1,"seed":1382},"id":"sensor-12","name":"Line 12","asset_path":"","asset":{
+        "name": "Default Line Sensor",
+        "model": "GenericAnalogLineSensor",
+        "sensor_type": "LineAnalog",
+        "visual_width_mm": 8,
+        "visual_height_mm": 8,
+        "visual_radius_mm": 4,
+        "detection_area": {
+          "kind": "Rectangle",
+          "width_mm": 5,
+          "height_mm": 2
+        },
+        "response_model": {
+          "kind": "Linear",
+          "gain": 1,
+          "offset": 0
+        },
+        "notes": ""
+      },"position_mm":[55,-16.799999999999997],"height_mm":0,"angle_deg":0,"enabled":true,"visible_in_preview":true},
+{"acquisition":{"adc_bits":12,"reflectance_noise_std":0.01,"adc_noise_lsb":1,"seed":1383},"id":"sensor-13","name":"Line 13","asset_path":"","asset":{
+        "name": "Default Line Sensor",
+        "model": "GenericAnalogLineSensor",
+        "sensor_type": "LineAnalog",
+        "visual_width_mm": 8,
+        "visual_height_mm": 8,
+        "visual_radius_mm": 4,
+        "detection_area": {
+          "kind": "Rectangle",
+          "width_mm": 5,
+          "height_mm": 2
+        },
+        "response_model": {
+          "kind": "Linear",
+          "gain": 1,
+          "offset": 0
+        },
+        "notes": ""
+      },"position_mm":[55,-21.6],"height_mm":0,"angle_deg":0,"enabled":true,"visible_in_preview":true},
+{"acquisition":{"adc_bits":12,"reflectance_noise_std":0.01,"adc_noise_lsb":1,"seed":1384},"id":"sensor-14","name":"Line 14","asset_path":"","asset":{
+        "name": "Default Line Sensor",
+        "model": "GenericAnalogLineSensor",
+        "sensor_type": "LineAnalog",
+        "visual_width_mm": 8,
+        "visual_height_mm": 8,
+        "visual_radius_mm": 4,
+        "detection_area": {
+          "kind": "Rectangle",
+          "width_mm": 5,
+          "height_mm": 2
+        },
+        "response_model": {
+          "kind": "Linear",
+          "gain": 1,
+          "offset": 0
+        },
+        "notes": ""
+      },"position_mm":[55,-26.4],"height_mm":0,"angle_deg":0,"enabled":true,"visible_in_preview":true},
+{"acquisition":{"adc_bits":12,"reflectance_noise_std":0.01,"adc_noise_lsb":1,"seed":1385},"id":"sensor-15","name":"Line 15","asset_path":"","asset":{
+        "name": "Default Line Sensor",
+        "model": "GenericAnalogLineSensor",
+        "sensor_type": "LineAnalog",
+        "visual_width_mm": 8,
+        "visual_height_mm": 8,
+        "visual_radius_mm": 4,
+        "detection_area": {
+          "kind": "Rectangle",
+          "width_mm": 5,
+          "height_mm": 2
+        },
+        "response_model": {
+          "kind": "Linear",
+          "gain": 1,
+          "offset": 0
+        },
+        "notes": ""
+      },"position_mm":[55,-31.2],"height_mm":0,"angle_deg":0,"enabled":true,"visible_in_preview":true},
+{"acquisition":{"adc_bits":12,"reflectance_noise_std":0.01,"adc_noise_lsb":1,"seed":1386},"id":"sensor-16","name":"Line 16","asset_path":"","asset":{
+        "name": "Default Line Sensor",
+        "model": "GenericAnalogLineSensor",
+        "sensor_type": "LineAnalog",
+        "visual_width_mm": 8,
+        "visual_height_mm": 8,
+        "visual_radius_mm": 4,
+        "detection_area": {
+          "kind": "Rectangle",
+          "width_mm": 5,
+          "height_mm": 2
+        },
+        "response_model": {
+          "kind": "Linear",
+          "gain": 1,
+          "offset": 0
+        },
+        "notes": ""
+      },"position_mm":[55,-36],"height_mm":0,"angle_deg":0,"enabled":true,"visible_in_preview":true}
+  ],
+  "line_validity_areas": [
+    {
+      "name": "Main body",
+      "position_mm": [0, 0],
+      "length_mm": 120,
+      "width_mm": 90,
+      "angle_deg": 0,
+      "enabled": true
+    }
+  ],
   "encoder": {
     "model": "QuantizedEncoder",
     "ticks_per_rev": 360,
@@ -95,18 +404,18 @@
   "gyro": {
     "model": "NoisyGyro",
     "noise_std_rad_s": 0.01,
-    "bias_rad_s": 0.0,
+    "bias_rad_s": 0,
     "saturation_rad_s": 34.9,
     "seed": 2467
   },
   "controller": {
     "model": "BuiltInPid",
-    "kp": 13.0,
-    "ki": 0.0,
+    "kp": 13,
+    "ki": 0,
     "kd": 0.035,
     "base_pwm": 0.34,
-    "max_pwm": 0.90,
-    "target_position_mm": 0.0,
-    "downforce_pwm": 0.80
+    "max_pwm": 0.9,
+    "target_position_mm": 0,
+    "downforce_pwm": 0.8
   }
 }

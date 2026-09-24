@@ -176,6 +176,7 @@ pub fn import_real_log(input: &Path) -> Result<RealLog, String> {
 
     let mut samples = Vec::new();
     for (line_idx, line) in reader.lines().enumerate() {
+        crate::experiments::jobs::check_cancelled()?;
         let line = line.map_err(|e| format!("failed to read CSV line {}: {e}", line_idx + 2))?;
         if line.trim().is_empty() {
             continue;
@@ -229,6 +230,7 @@ pub fn write_normalized_real_log(log: &RealLog, output: &Path) -> io::Result<()>
     }
     writeln!(writer)?;
     for sample in &log.samples {
+        crate::experiments::jobs::check_cancelled().map_err(std::io::Error::other)?;
         write!(
             writer,
             "{},{}",
@@ -254,25 +256,15 @@ pub fn run_simulation_samples(
     cfg: LoadedConfig,
     duration_us: Option<u64>,
 ) -> Result<Vec<TelemetrySample>, String> {
-    let log_period_us = cfg
-        .project
-        .time
-        .log_period_us
-        .max(cfg.project.time.physics_dt_us);
     let mut session = SimulationSession::new(cfg, duration_us)?;
     let mut samples = Vec::new();
-    let mut next_log_us = 0u64;
-
     loop {
-        let t_us = session.time_us();
-        if t_us >= next_log_us {
+        if session.should_log() {
             samples.push(session.sample());
-            next_log_us = next_log_us.saturating_add(log_period_us);
         }
-        if session.is_finished() {
+        if !session.try_step()? {
             break;
         }
-        session.step_once();
     }
     Ok(samples)
 }
@@ -284,10 +276,13 @@ pub fn compare_project_with_real(
 ) -> Result<ComparisonReport, String> {
     let duration = duration_us.unwrap_or_else(|| real.samples.last().map(|s| s.t_us).unwrap_or(0));
     let sim_samples = run_simulation_samples(cfg, Some(duration))?;
-    Ok(compare_samples(&sim_samples, real))
+    compare_samples(&sim_samples, real)
 }
 
-pub fn compare_samples(sim_samples: &[TelemetrySample], real: &RealLog) -> ComparisonReport {
+pub fn compare_samples(
+    sim_samples: &[TelemetrySample],
+    real: &RealLog,
+) -> Result<ComparisonReport, String> {
     let mut rows = Vec::new();
     let mut trajectory_errors = Vec::new();
     let mut yaw_errors = Vec::new();
@@ -298,13 +293,14 @@ pub fn compare_samples(sim_samples: &[TelemetrySample], real: &RealLog) -> Compa
     let mut sensor_errors = Vec::new();
 
     if sim_samples.is_empty() || real.samples.is_empty() {
-        return ComparisonReport {
+        return Ok(ComparisonReport {
             metrics: ComparisonMetrics::default(),
             rows,
-        };
+        });
     }
 
     for real_sample in &real.samples {
+        crate::experiments::jobs::check_cancelled()?;
         let Some(sim) = interpolated_sim_sample(sim_samples, real_sample.t_us) else {
             continue;
         };
@@ -399,13 +395,14 @@ pub fn compare_samples(sim_samples: &[TelemetrySample], real: &RealLog) -> Compa
         ),
     };
 
-    ComparisonReport { metrics, rows }
+    Ok(ComparisonReport { metrics, rows })
 }
 
 pub fn write_comparison_csv(report: &ComparisonReport, output: &Path) -> io::Result<()> {
     let mut writer = BufWriter::new(File::create(output)?);
     writeln!(writer, "t_us,t_s,sim_x_m,real_x_m,sim_y_m,real_y_m,sim_yaw_rad,real_yaw_rad,trajectory_error_m,yaw_error_rad,speed_error_m_s,line_position_error_m,line_error_m,sensor_rmse_adc")?;
     for row in &report.rows {
+        crate::experiments::jobs::check_cancelled().map_err(std::io::Error::other)?;
         write!(writer, "{},{}", row.t_us, row.t_us as f64 / 1_000_000.0)?;
         write!(writer, ",{:.9}", row.sim_x_m)?;
         write_optional(&mut writer, row.real_x_m)?;
@@ -428,7 +425,11 @@ pub fn write_comparison_report(report: &ComparisonReport, output: &Path) -> io::
     let mut writer = BufWriter::new(File::create(output)?);
     writeln!(
         writer,
-        "Robotrace Sim v0.08 - comparação simulação vs robô real"
+        concat!(
+            "Robotrace Sim ",
+            env!("CARGO_PKG_VERSION"),
+            " - comparação simulação vs robô real"
+        )
     )?;
     writeln!(writer, "amostras reais: {}", report.metrics.real_samples)?;
     writeln!(writer, "amostras simuladas: {}", report.metrics.sim_samples)?;
@@ -500,7 +501,9 @@ pub fn tune_project_against_real(
     let mut evaluated = 0usize;
 
     for mu_scale in mu_scales {
+        crate::experiments::jobs::check_cancelled()?;
         for torque_scale in torque_scales {
+            crate::experiments::jobs::check_cancelled()?;
             let mut candidate_cfg = cfg.clone();
             candidate_cfg.robot.tire.mu_longitudinal = base_mu * mu_scale;
             candidate_cfg.robot.motor_left.stall_torque_nm = base_left_torque * torque_scale;

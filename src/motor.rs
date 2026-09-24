@@ -35,6 +35,130 @@ impl DcMotorSimple {
     }
 }
 
+/// Affine quasi-static motor, integrated implicitly together with contact.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct MotorDrive {
+    pub lower_torque: Option<f64>,
+    pub upper_torque: Option<f64>,
+    pub viscous_damping: f64,
+    pub target_omega: f64,
+    pub damping: f64,
+    pub torque_limit: f64,
+    pwm: f64,
+    voltage: f64,
+    torque_per_amp: f64,
+    gear_efficiency: f64,
+    braking: bool,
+    coasting: bool,
+}
+
+impl MotorDrive {
+    pub(crate) fn affine(target: f64, damping: f64, lower: f64, upper: f64, viscous: f64) -> Self {
+        Self {
+            target_omega: target,
+            damping,
+            torque_limit: lower.abs().max(upper.abs()),
+            lower_torque: Some(lower),
+            upper_torque: Some(upper),
+            viscous_damping: viscous,
+            torque_per_amp: 1.,
+            gear_efficiency: 1.,
+            ..Self::default()
+        }
+    }
+    pub(crate) fn lower(self) -> f64 {
+        self.lower_torque.unwrap_or(-self.torque_limit)
+    }
+    pub(crate) fn upper(self) -> f64 {
+        self.upper_torque.unwrap_or(self.torque_limit)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn constant_torque(torque: f64) -> Self {
+        Self {
+            target_omega: 1e10 * torque.signum(),
+            damping: 1.0,
+            torque_limit: torque.abs(),
+            ..Self::default()
+        }
+    }
+    pub fn output(self, wheel_torque: f64) -> MotorOutput {
+        if self.coasting {
+            return MotorOutput {
+                coasting: true,
+                ..MotorOutput::default()
+            };
+        }
+        let current = wheel_torque / self.torque_per_amp;
+        MotorOutput {
+            wheel_torque_nm: wheel_torque,
+            motor_torque_nm: wheel_torque / self.gear_efficiency,
+            current_a: current,
+            // Non-regenerative bridge: returned energy is dissipated, never credited to SOC.
+            supply_current_a: if self.braking {
+                0.0
+            } else {
+                (current * self.pwm).max(0.0)
+            },
+            voltage_v: self.voltage,
+            applied_pwm: self.pwm,
+            braking: self.braking,
+            coasting: self.coasting,
+        }
+    }
+}
+
+impl DcMotorSimple {
+    pub(crate) fn drive(
+        &self,
+        pwm: f64,
+        voltage: f64,
+        driver: &DriverConfig,
+        supply_budget: f64,
+    ) -> MotorDrive {
+        let pwm = quantize_pwm(clamp_unit(pwm), driver.pwm_resolution_bits);
+        let zero = pwm.abs() <= driver.command_deadband;
+        let coast = zero
+            && matches!(
+                driver.mode.to_ascii_lowercase().as_str(),
+                "coast" | "free" | "hi-z" | "hiz"
+            );
+        if coast {
+            return MotorDrive {
+                coasting: true,
+                ..MotorDrive::default()
+            };
+        }
+        let pwm = if zero { 0.0 } else { pwm };
+        let voltage = pwm * (voltage - driver.voltage_drop_v).max(0.0);
+        let resistance = self.cfg.nominal_voltage_v / self.cfg.stall_current_a;
+        let ke = self.cfg.nominal_voltage_v / (self.cfg.no_load_rpm * 2.0 * PI / 60.0);
+        let kt = self.cfg.stall_torque_nm / self.cfg.stall_current_a;
+        let gear_efficiency = self.cfg.gear_ratio * self.cfg.efficiency;
+        let torque_per_amp = kt * gear_efficiency;
+        // Equal reserved DC bus shares. Conservative during braking/reversal.
+        let limit = if zero {
+            driver.current_limit_a
+        } else {
+            driver.current_limit_a.min(supply_budget / pwm.abs())
+        };
+        MotorDrive {
+            lower_torque: None,
+            upper_torque: None,
+            viscous_damping: 0.,
+            target_omega: voltage / (ke * self.cfg.gear_ratio),
+            damping: torque_per_amp * ke * self.cfg.gear_ratio / resistance,
+            torque_limit: limit * torque_per_amp,
+            pwm,
+            voltage,
+            torque_per_amp,
+            gear_efficiency,
+            braking: zero,
+            coasting: false,
+        }
+    }
+}
+
 impl MotorModel for DcMotorSimple {
     fn step(
         &self,
@@ -43,103 +167,13 @@ impl MotorModel for DcMotorSimple {
         battery_voltage_v: f64,
         driver: &DriverConfig,
     ) -> MotorOutput {
-        let pwm = quantize_pwm(clamp_unit(pwm), driver.pwm_resolution_bits);
-        let no_load_rad_s = self.cfg.no_load_rpm * 2.0 * PI / 60.0;
-        let motor_omega = wheel_omega_rad_s * self.cfg.gear_ratio;
-        let speed_fraction = if no_load_rad_s.abs() > 1e-9 {
-            motor_omega / no_load_rad_s
-        } else {
-            0.0
-        };
-
-        if pwm.abs() <= driver.command_deadband.max(0.0) {
-            return zero_pwm_response(&self.cfg, speed_fraction, driver);
-        }
-
-        let available_voltage = clamp(
-            battery_voltage_v - driver.voltage_drop_v.max(0.0),
-            0.0,
-            battery_voltage_v.max(0.0),
+        let drive = self.drive(pwm, battery_voltage_v, driver, f64::INFINITY);
+        let torque = clamp(
+            drive.damping * (drive.target_omega - wheel_omega_rad_s),
+            -drive.torque_limit,
+            drive.torque_limit,
         );
-        let command_voltage = pwm * available_voltage;
-        let voltage_fraction = if battery_voltage_v.abs() > 1e-9 {
-            command_voltage / battery_voltage_v
-        } else {
-            0.0
-        };
-
-        // Linear DC motor model with back-EMF. Negative PWM naturally generates reverse torque.
-        let raw_motor_torque = clamp(
-            self.cfg.stall_torque_nm * (voltage_fraction - speed_fraction),
-            -self.cfg.stall_torque_nm,
-            self.cfg.stall_torque_nm,
-        );
-        finish_output(
-            &self.cfg,
-            raw_motor_torque,
-            command_voltage,
-            pwm,
-            driver,
-            false,
-            false,
-        )
-    }
-}
-
-fn zero_pwm_response(cfg: &MotorConfig, speed_fraction: f64, driver: &DriverConfig) -> MotorOutput {
-    match driver.mode.to_ascii_lowercase().as_str() {
-        "coast" | "free" | "hi-z" | "hiz" => MotorOutput {
-            coasting: true,
-            ..MotorOutput::default()
-        },
-        _ => {
-            // Brake mode approximates low-side/short-brake behavior: the motor terminals are
-            // shorted, so back-EMF creates a torque opposing rotation without drawing battery power.
-            let brake_torque = clamp(
-                -cfg.stall_torque_nm * speed_fraction,
-                -cfg.stall_torque_nm,
-                cfg.stall_torque_nm,
-            );
-            finish_output(cfg, brake_torque, 0.0, 0.0, driver, true, false)
-        }
-    }
-}
-
-fn finish_output(
-    cfg: &MotorConfig,
-    raw_motor_torque: f64,
-    command_voltage: f64,
-    pwm: f64,
-    driver: &DriverConfig,
-    braking: bool,
-    coasting: bool,
-) -> MotorOutput {
-    let raw_current_a =
-        cfg.stall_current_a * (raw_motor_torque.abs() / cfg.stall_torque_nm.max(1e-12));
-    let current_limit = driver.current_limit_a.max(0.0);
-    let scale = if current_limit > 0.0 && raw_current_a > current_limit {
-        current_limit / raw_current_a
-    } else {
-        1.0
-    };
-    let motor_torque = raw_motor_torque * scale;
-    let current_a = raw_current_a * scale;
-    let wheel_torque = motor_torque * cfg.gear_ratio * cfg.efficiency;
-    let supply_current_a = if braking || coasting {
-        0.0
-    } else {
-        current_a * pwm.abs()
-    };
-
-    MotorOutput {
-        wheel_torque_nm: wheel_torque,
-        motor_torque_nm: motor_torque,
-        current_a,
-        supply_current_a,
-        voltage_v: command_voltage,
-        applied_pwm: pwm,
-        braking,
-        coasting,
+        drive.output(torque)
     }
 }
 
@@ -157,6 +191,7 @@ mod tests {
 
     fn motor_cfg() -> MotorConfig {
         MotorConfig {
+            nominal_voltage_v: 7.4,
             model: "DcMotorSimple".to_string(),
             gear_ratio: 10.0,
             efficiency: 1.0,

@@ -1,18 +1,18 @@
 use crate::telemetry::TelemetrySample;
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufWriter, Read, Write};
 use std::path::Path;
 
 const MAGIC: &[u8; 8] = b"RTSRPL03";
 const VERSION: u16 = 3;
 const FIXED_F64_COUNT: usize = 44;
 
-pub struct BinaryReplayLogger {
+pub struct LegacyReplayLogger {
     writer: BufWriter<File>,
     sensor_count: usize,
 }
 
-impl BinaryReplayLogger {
+impl LegacyReplayLogger {
     pub fn create(path: &Path, sensor_count: usize) -> io::Result<Self> {
         let file = File::create(path)?;
         let mut logger = Self {
@@ -89,49 +89,6 @@ impl BinaryReplayLogger {
     }
 }
 
-pub fn export_replay_to_csv(input: &Path, output: &Path) -> io::Result<usize> {
-    let mut reader = BufReader::new(File::open(input)?);
-    let mut magic = [0u8; 8];
-    reader.read_exact(&mut magic)?;
-    if &magic != MAGIC {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid RTS replay magic",
-        ));
-    }
-    let version = read_u16(&mut reader)?;
-    if version != VERSION {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("unsupported replay version {version}"),
-        ));
-    }
-    let sensor_count = read_u16(&mut reader)? as usize;
-    let fixed_count = read_u32(&mut reader)? as usize;
-    if fixed_count != FIXED_F64_COUNT {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "unsupported replay fixed field count",
-        ));
-    }
-
-    let mut writer = BufWriter::new(File::create(output)?);
-    write_csv_header(&mut writer, sensor_count)?;
-    let mut count = 0usize;
-    loop {
-        match read_sample_values(&mut reader, sensor_count) {
-            Ok(Some(sample)) => {
-                write_csv_row(&mut writer, &sample, sensor_count)?;
-                count += 1;
-            }
-            Ok(None) => break,
-            Err(err) => return Err(err),
-        }
-    }
-    writer.flush()?;
-    Ok(count)
-}
-
 struct ReplayRow {
     t_us: u64,
     f: [f64; FIXED_F64_COUNT],
@@ -168,82 +125,10 @@ fn read_sample_values<R: Read>(
     }))
 }
 
-fn write_csv_header<W: Write>(writer: &mut W, sensor_count: usize) -> io::Result<()> {
-    write!(
-        writer,
-        "t_us,t_s,x_m,y_m,yaw_rad,vx_body_m_s,vy_body_m_s,yaw_rate_rad_s,line_position_m,line_error_m,line_visible,line_confidence,pwm_left,pwm_right,pwm_downforce,motor_current_left_a,motor_current_right_a,motor_torque_left_nm,motor_torque_right_nm,wheel_force_left_n,wheel_force_right_n,desired_wheel_force_left_n,desired_wheel_force_right_n,slip_left,slip_right,normal_left_n,normal_right_n,normal_front_left_n,normal_front_right_n,normal_rear_left_n,normal_rear_right_n,downforce_extra_n,downforce_fan_n,downforce_suction_n,downforce_current_a,battery_voltage_v,battery_current_a,encoder_left_ticks,encoder_right_ticks,encoder_left_velocity_rad_s,encoder_right_velocity_rad_s,gyro_yaw_rate_rad_s,gyro_bias_rad_s,motor_voltage_left_v,motor_voltage_right_v,wheel_surface_speed_left_m_s,wheel_surface_speed_right_m_s"
-    )?;
-    for i in 0..sensor_count {
-        write!(writer, ",sensor_{:02}_adc", i)?;
-    }
-    writeln!(writer)
-}
-
-fn write_csv_row<W: Write>(writer: &mut W, row: &ReplayRow, sensor_count: usize) -> io::Result<()> {
-    write!(writer, "{},{}", row.t_us, row.t_us as f64 / 1_000_000.0)?;
-    for (idx, value) in row.f.iter().enumerate() {
-        if idx == 8 {
-            write!(writer, ",{}", row.line_visible as u8)?;
-        }
-        write!(writer, ",{:.9}", value)?;
-    }
-    for i in 0..sensor_count {
-        write!(writer, ",{}", row.adc.get(i).copied().unwrap_or(0))?;
-    }
-    writeln!(writer)
-}
-
 #[derive(Debug, Clone)]
 pub struct ReplayData {
     pub sensor_count: usize,
     pub samples: Vec<TelemetrySample>,
-}
-
-pub fn load_replay_samples(input: &Path, max_samples: usize) -> io::Result<ReplayData> {
-    let mut reader = BufReader::new(File::open(input)?);
-    let mut magic = [0u8; 8];
-    reader.read_exact(&mut magic)?;
-    if &magic != MAGIC {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid RTS replay magic",
-        ));
-    }
-    let version = read_u16(&mut reader)?;
-    if version != VERSION {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("unsupported replay version {version}"),
-        ));
-    }
-    let sensor_count = read_u16(&mut reader)? as usize;
-    let fixed_count = read_u32(&mut reader)? as usize;
-    if fixed_count != FIXED_F64_COUNT {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "unsupported replay fixed field count",
-        ));
-    }
-
-    let mut samples = Vec::new();
-    let cap = max_samples.max(1);
-    loop {
-        match read_sample_values(&mut reader, sensor_count) {
-            Ok(Some(row)) => {
-                if samples.len() < cap {
-                    samples.push(row_to_telemetry(row));
-                } else {
-                    break;
-                }
-            }
-            Ok(None) => break,
-            Err(err) => return Err(err),
-        }
-    }
-    Ok(ReplayData {
-        sensor_count,
-        samples,
-    })
 }
 
 fn row_to_telemetry(row: ReplayRow) -> TelemetrySample {
@@ -326,3 +211,65 @@ fn read_f64<R: Read>(reader: &mut R) -> io::Result<f64> {
     reader.read_exact(&mut b)?;
     Ok(f64::from_le_bytes(b))
 }
+
+fn write_record<W: Write>(
+    writer: &mut W,
+    s: &TelemetrySample,
+    sensor_count: usize,
+) -> io::Result<()> {
+    write_u64(writer, s.t_us)?;
+    write_f64(writer, s.x_m)?;
+    write_f64(writer, s.y_m)?;
+    write_f64(writer, s.yaw_rad)?;
+    write_f64(writer, s.vx_body_m_s)?;
+    write_f64(writer, s.vy_body_m_s)?;
+    write_f64(writer, s.yaw_rate_rad_s)?;
+    write_f64(writer, s.line_position_m)?;
+    write_f64(writer, s.line_error_m)?;
+    write_f64(writer, s.line_confidence)?;
+    write_f64(writer, s.pwm_left)?;
+    write_f64(writer, s.pwm_right)?;
+    write_f64(writer, s.pwm_downforce)?;
+    write_f64(writer, s.motor_current_left_a)?;
+    write_f64(writer, s.motor_current_right_a)?;
+    write_f64(writer, s.motor_torque_left_nm)?;
+    write_f64(writer, s.motor_torque_right_nm)?;
+    write_f64(writer, s.wheel_force_left_n)?;
+    write_f64(writer, s.wheel_force_right_n)?;
+    write_f64(writer, s.desired_wheel_force_left_n)?;
+    write_f64(writer, s.desired_wheel_force_right_n)?;
+    write_f64(writer, s.slip_left)?;
+    write_f64(writer, s.slip_right)?;
+    write_f64(writer, s.normal_left_n)?;
+    write_f64(writer, s.normal_right_n)?;
+    write_f64(writer, s.normal_front_left_n)?;
+    write_f64(writer, s.normal_front_right_n)?;
+    write_f64(writer, s.normal_rear_left_n)?;
+    write_f64(writer, s.normal_rear_right_n)?;
+    write_f64(writer, s.downforce_extra_n)?;
+    write_f64(writer, s.downforce_fan_n)?;
+    write_f64(writer, s.downforce_suction_n)?;
+    write_f64(writer, s.downforce_current_a)?;
+    write_f64(writer, s.battery_voltage_v)?;
+    write_f64(writer, s.battery_current_a)?;
+    write_f64(writer, s.encoder_left_ticks as f64)?;
+    write_f64(writer, s.encoder_right_ticks as f64)?;
+    write_f64(writer, s.encoder_left_velocity_rad_s)?;
+    write_f64(writer, s.encoder_right_velocity_rad_s)?;
+    write_f64(writer, s.gyro_yaw_rate_rad_s)?;
+    write_f64(writer, s.gyro_bias_rad_s)?;
+    write_f64(writer, s.motor_voltage_left_v)?;
+    write_f64(writer, s.motor_voltage_right_v)?;
+    write_f64(writer, s.wheel_surface_speed_left_m_s)?;
+    write_f64(writer, s.wheel_surface_speed_right_m_s)?;
+    writer.write_all(&[s.line_visible as u8])?;
+    for i in 0..sensor_count {
+        write_u32(writer, s.sensor_adc.get(i).copied().unwrap_or(0))?;
+    }
+    Ok(())
+}
+
+include!("io/replay_v4.rs");
+
+/// Channel order and units of the v4 binary record.
+pub const CHANNEL_SCHEMA_JSON: &str = r#"[{"name":"t_us","encoding":"u64-le","unit":"us"},{"name":"x_m","encoding":"f64-le","unit":"m"},{"name":"y_m","encoding":"f64-le","unit":"m"},{"name":"yaw_rad","encoding":"f64-le","unit":"rad"},{"name":"vx_body_m_s","encoding":"f64-le","unit":"m/s"},{"name":"vy_body_m_s","encoding":"f64-le","unit":"m/s"},{"name":"yaw_rate_rad_s","encoding":"f64-le","unit":"rad/s"},{"name":"line_position_m","encoding":"f64-le","unit":"m"},{"name":"line_error_m","encoding":"f64-le","unit":"m"},{"name":"line_confidence","encoding":"f64-le","unit":"1"},{"name":"pwm_left","encoding":"f64-le","unit":"1"},{"name":"pwm_right","encoding":"f64-le","unit":"1"},{"name":"pwm_downforce","encoding":"f64-le","unit":"1"},{"name":"motor_current_left_a","encoding":"f64-le","unit":"A"},{"name":"motor_current_right_a","encoding":"f64-le","unit":"A"},{"name":"motor_torque_left_nm","encoding":"f64-le","unit":"N m"},{"name":"motor_torque_right_nm","encoding":"f64-le","unit":"N m"},{"name":"wheel_force_left_n","encoding":"f64-le","unit":"N"},{"name":"wheel_force_right_n","encoding":"f64-le","unit":"N"},{"name":"desired_wheel_force_left_n","encoding":"f64-le","unit":"N"},{"name":"desired_wheel_force_right_n","encoding":"f64-le","unit":"N"},{"name":"slip_left","encoding":"f64-le","unit":"1"},{"name":"slip_right","encoding":"f64-le","unit":"1"},{"name":"normal_left_n","encoding":"f64-le","unit":"N"},{"name":"normal_right_n","encoding":"f64-le","unit":"N"},{"name":"normal_front_left_n","encoding":"f64-le","unit":"N"},{"name":"normal_front_right_n","encoding":"f64-le","unit":"N"},{"name":"normal_rear_left_n","encoding":"f64-le","unit":"N"},{"name":"normal_rear_right_n","encoding":"f64-le","unit":"N"},{"name":"downforce_extra_n","encoding":"f64-le","unit":"N"},{"name":"downforce_fan_n","encoding":"f64-le","unit":"N"},{"name":"downforce_suction_n","encoding":"f64-le","unit":"N"},{"name":"downforce_current_a","encoding":"f64-le","unit":"A"},{"name":"battery_voltage_v","encoding":"f64-le","unit":"V"},{"name":"battery_current_a","encoding":"f64-le","unit":"A"},{"name":"encoder_left_ticks_legacy_f64","encoding":"f64-le","unit":"tick"},{"name":"encoder_right_ticks_legacy_f64","encoding":"f64-le","unit":"tick"},{"name":"encoder_left_velocity_rad_s","encoding":"f64-le","unit":"rad/s"},{"name":"encoder_right_velocity_rad_s","encoding":"f64-le","unit":"rad/s"},{"name":"gyro_yaw_rate_rad_s","encoding":"f64-le","unit":"rad/s"},{"name":"gyro_bias_rad_s","encoding":"f64-le","unit":"rad/s"},{"name":"motor_voltage_left_v","encoding":"f64-le","unit":"V"},{"name":"motor_voltage_right_v","encoding":"f64-le","unit":"V"},{"name":"wheel_surface_speed_left_m_s","encoding":"f64-le","unit":"m/s"},{"name":"wheel_surface_speed_right_m_s","encoding":"f64-le","unit":"m/s"},{"name":"line_visible","encoding":"u8","unit":"boolean"},{"name":"sensor_adc","encoding":"u32-le[]","unit":"ADC code; frozen sensor order"},{"name":"encoder_left_ticks","encoding":"i64-le","unit":"tick"},{"name":"encoder_right_ticks","encoding":"i64-le","unit":"tick"}]"#;
